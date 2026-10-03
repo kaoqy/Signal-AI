@@ -784,3 +784,17 @@ a { color: inherit; text-decoration: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+.provider-model-list { display: grid; gap: 6px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
+.provider-card-model { margin-top: 0; padding: 8px 0; }
+.provider-model-name { display: inline-flex; align-items: center; min-width: 0; gap: 8px; overflow: hidden; border: 0; background: transparent; color: var(--text); font-size: 10px; font-weight: 550; text-align: left; cursor: pointer; }
+.provider-model-name > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-model-name:hover { color: var(--accent-strong); }
+.provider-model-latency { margin-left: auto; color: var(--text-faint); font-size: 9px; font-variant-numeric: tabular-nums; }
+.provider-model-empty { color: var(--text-faint); font-size: 10px; }
+.provider-add-model { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; margin-top: 2px; }
+.provider-add-model input { min-height: 32px; font-size: 10px; }
+.model-manage-list { display: grid; gap: 7px; padding: 10px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--panel); }
+.model-manage-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; font-size: 10px; }
+.model-manage-row span { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.tiny-button { min-height: 29px; padding: 0 9px; font-size: 9px; }

@@ -1,11 +1,13 @@
 export type Status = 'UP' | 'SLOW' | 'DOWN' | 'TIMEOUT' | 'ERROR' | 'DISABLED' | 'UNKNOWN' | 'UNKNOWN_RESPONSE' | 'DEGRADED' | 'RECOVERING';
 export type ApiType = 'openai' | 'gemini' | 'anthropic' | 'custom';
+export type RequestFormat = 'openai_chat' | 'openai_responses' | 'anthropic_messages' | 'gemini_generate';
 
 export interface Model {
   id: string;
   provider_id: string;
   provider_name: string;
   api_type: ApiType;
+  request_format: RequestFormat;
   name: string;
   enabled: number;
   current_status: Status;
@@ -24,6 +26,7 @@ export interface Provider {
   id: string;
   name: string;
   api_type: ApiType;
+  request_format: RequestFormat;
   base_url: string;
   keyHint: string;
   apiKeySet: boolean;
@@ -34,7 +37,7 @@ export interface Provider {
   customBodySet?: boolean;
   expected_status_json: string;
   response_path: string;
-  model: Model | null;
+  models: Model[];
 }
 
 export interface Check {

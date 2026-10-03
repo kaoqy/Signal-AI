@@ -1,6 +1,6 @@
 # Signal AI — AI 模型可用性监控平台
 
-Signal AI 是一套部署在 Cloudflare 上的 AI API 可用性监控平台。它会按模型自己的周期发送小型真实模型请求，记录状态、HTTP 响应、耗时、TTFT、错误详情和 Incident，并提供中英双语的 React 管理面板与免登录公开状态首页。
+Signal AI 支持在一个 Provider 下保存多个模型。它是一套部署在 Cloudflare 上的 AI API 可用性监控平台。它会按模型自己的周期发送小型真实模型请求，记录状态、HTTP 响应、耗时、TTFT、错误详情和 Incident，并提供中英双语的 React 管理面板与免登录公开状态首页。
 
 ## 部署前先看：需要创建什么？
 
@@ -189,7 +189,7 @@ D1 迁移采用增量方式，不要修改已经在生产环境执行过的迁�
 - OpenAI Compatible：向 `POST {baseURL}/chat/completions` 发送包含 `model`、一条用户消息、`max_tokens`、`temperature` 的请求；启用 `stream: true`，并在收到 SSE 流时测量 TTFT。
 - Anthropic：向 `POST {baseURL}/v1/messages` 发送请求，包含必需的 `anthropic-version` Header，并启用流式响应。
 - Gemini：向 `POST {baseURL}/models/{model}:generateContent` 发送请求；当前使用非流式调用，因此不报告 TTFT。
-- Custom：可以配置相对 URL 路径、方法、Header、JSON/字符串 Body、预期状态码和可选的点号/数组索引响应路径。Body 支持 `{{model}}`、`{{prompt}}` 和 `{{max_tokens}}` 占位符。
+- OpenAI 支持两种格式：`Chat Completions` 和 `Responses`；Anthropic 使用 `Messages`；Gemini 使用 `generateContent`。请求路径、Header 和 Body 会自动构造，普通用户无需手写 HTTP 请求。
 
 响应解析支持 OpenAI 的 `choices[0].message.content`、`choices[0].text`、`output_text`、顶层 `content`，以及 Anthropic 文本块和 Gemini 的 `candidates[0].content.parts[0].text`。HTTP 请求成功但未找到可识别文本时，结果为 `UNKNOWN_RESPONSE`，不会直接计为服务故障。
 
@@ -207,8 +207,9 @@ D1 迁移采用增量方式，不要修改已经在生产环境执行过的迁�
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET / POST | `/api/providers` | List providers (API keys masked) / create provider plus its first model |
-| PUT / DELETE | `/api/providers/:id` | Update or delete a provider and its linked models |
+| GET / POST | `/api/providers` | List providers with all models (keys masked) / create a provider and its first model |
+| POST | `/api/providers/:id/models` | Add another model to an existing provider |
+| PUT / DELETE | `/api/providers/:id` | Update or delete a provider and all linked models |
 | POST | `/api/providers/test` | Run an unsaved connection test |
 | GET | `/api/models` | List models with current state |
 | GET / PUT / DELETE | `/api/models/:id` | Read/update/delete a model |

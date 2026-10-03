@@ -40,6 +40,11 @@ function extractText(json: unknown, apiType: string, responsePath = ''): string 
   }
   if (typeof choice?.text === 'string') return choice.text;
   if (typeof root.output_text === 'string') return root.output_text;
+  if (Array.isArray(root.output)) {
+    const outputText = (root.output as Array<Record<string, unknown>>).flatMap((item) => Array.isArray(item.content) ? item.content : [])
+      .map((part) => part && typeof part === 'object' && typeof (part as Record<string, unknown>).text === 'string' ? (part as Record<string, string>).text : '').join('');
+    if (outputText) return outputText;
+  }
   if (typeof root.content === 'string') return root.content;
   const candidates = root.candidates as Array<Record<string, unknown>> | undefined;
   const parts = (candidates?.[0]?.content as Record<string, unknown> | undefined)?.parts as Array<Record<string, unknown>> | undefined;
@@ -55,6 +60,7 @@ function extractText(json: unknown, apiType: string, responsePath = ''): string 
 function streamText(json: unknown): string {
   if (!json || typeof json !== 'object') return '';
   const root = json as Record<string, unknown>;
+  if (typeof root.delta === 'string' && String(root.type ?? '').includes('output_text')) return root.delta;
   const choice = (root.choices as Array<Record<string, unknown>> | undefined)?.[0];
   const delta = choice?.delta as Record<string, unknown> | undefined;
   if (typeof delta?.content === 'string') return delta.content;
@@ -139,36 +145,48 @@ async function readResponse(response: Response, streaming: boolean, started: num
 
 function buildRequest(provider: ModelProvider, model: ModelRow, secrets: SecretBundle): { url: URL; method: string; headers: Headers; body: string | null; streaming: boolean } {
   const type = provider.api_type;
-  const base = provider.base_url.replace(/\/+$/, '');
+  const format = provider.request_format ?? (type === 'anthropic' ? 'anthropic_messages' : type === 'gemini' ? 'gemini_generate' : 'openai_chat');
+  let base = provider.base_url.replace(/\/+$/, '');
   const headers = new Headers(asObject(provider.headers_json));
   for (const [key, value] of Object.entries(secrets.sensitiveHeaders ?? {})) headers.set(key, value);
-  let url: URL;
+  let url: URL | null = null;
   let method = 'POST';
-  let body: Record<string, unknown> | string | null;
+  let body: Record<string, unknown> | string | null = null;
   let streaming = false;
-  if (type === 'openai') {
-    url = new URL(`${base}/chat/completions`);
-    if (secrets.apiKey && !headers.has('authorization')) headers.set('Authorization', `Bearer ${secrets.apiKey}`);
-    body = { model: model.name, messages: [{ role: 'user', content: model.prompt }], max_tokens: model.max_tokens, temperature: model.temperature, stream: true };
-    streaming = true;
-  } else if (type === 'anthropic') {
-    url = new URL(`${base}/v1/messages`);
-    if (secrets.apiKey && !headers.has('x-api-key')) headers.set('x-api-key', secrets.apiKey);
-    headers.set('anthropic-version', headers.get('anthropic-version') ?? '2023-06-01');
-    body = { model: model.name, max_tokens: model.max_tokens, temperature: model.temperature, messages: [{ role: 'user', content: model.prompt }], stream: true };
-    streaming = true;
-  } else if (type === 'gemini') {
-    url = new URL(`${base}/models/${encodeURIComponent(model.name)}:generateContent`);
-    if (secrets.apiKey) url.searchParams.set('key', secrets.apiKey);
-    body = { contents: [{ role: 'user', parts: [{ text: model.prompt }] }], generationConfig: { maxOutputTokens: model.max_tokens, temperature: model.temperature } };
-  } else {
+  if (type === 'custom') {
     method = (provider.custom_method || 'POST').toUpperCase();
     url = new URL(`${base}${provider.custom_path.startsWith('/') || !provider.custom_path ? '' : '/'}${provider.custom_path}`);
     if (secrets.apiKey && !headers.has('authorization') && !headers.has('x-api-key')) headers.set('Authorization', `Bearer ${secrets.apiKey}`);
     const template = provider.custom_body || JSON.stringify({ model: model.name, messages: [{ role: 'user', content: model.prompt }], max_tokens: model.max_tokens });
     body = method === 'GET' ? null : template.replaceAll('{{model}}', model.name).replaceAll('{{prompt}}', model.prompt).replaceAll('{{max_tokens}}', String(model.max_tokens));
+  } else if (format === 'openai_chat') {
+    if (!/\/v1$/i.test(new URL(base).pathname)) base += '/v1';
+    url = new URL(`${base}/chat/completions`);
+    if (secrets.apiKey && !headers.has('authorization')) headers.set('Authorization', `Bearer ${secrets.apiKey}`);
+    body = { model: model.name, messages: [{ role: 'user', content: model.prompt }], max_tokens: model.max_tokens, stream: true };
+    streaming = true;
+  } else if (format === 'openai_responses') {
+    if (!/\/v1$/i.test(new URL(base).pathname)) base += '/v1';
+    url = new URL(`${base}/responses`);
+    if (secrets.apiKey && !headers.has('authorization')) headers.set('Authorization', `Bearer ${secrets.apiKey}`);
+    body = { model: model.name, input: model.prompt, max_output_tokens: model.max_tokens, stream: true };
+    streaming = true;
+  } else if (format === 'anthropic_messages') {
+    const basePath = new URL(base).pathname.replace(/\/+$/, '');
+    const endpoint = /\/v1$/i.test(basePath) ? '/messages' : '/v1/messages';
+    url = new URL(`${base}${endpoint}`);
+    if (secrets.apiKey && !headers.has('x-api-key')) headers.set('x-api-key', secrets.apiKey);
+    headers.set('anthropic-version', headers.get('anthropic-version') ?? '2023-06-01');
+    body = { model: model.name, max_tokens: model.max_tokens, messages: [{ role: 'user', content: model.prompt }], stream: true };
+    streaming = true;
+  } else if (format === 'gemini_generate') {
+    if (!/\/v1beta$/i.test(new URL(base).pathname)) base += '/v1beta';
+    url = new URL(`${base}/models/${encodeURIComponent(model.name)}:generateContent`);
+    if (secrets.apiKey && !headers.has('x-goog-api-key')) headers.set('x-goog-api-key', secrets.apiKey);
+    body = { contents: [{ role: 'user', parts: [{ text: model.prompt }] }], generationConfig: { maxOutputTokens: model.max_tokens, temperature: model.temperature } };
   }
   if (body !== null && !headers.has('content-type')) headers.set('content-type', 'application/json');
+  if (!url) throw new Error('No request could be built for the selected format.');
   return { url, method, headers, body: typeof body === 'string' ? body : body ? JSON.stringify(body) : null, streaming };
 }
 

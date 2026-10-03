@@ -75,9 +75,9 @@ class DevTools {
     });
   }
   async evaluate(expression) {
-    const result = await this.command('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
-    if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
-    return result.result?.value;
+    const result = await this.command('Runtime.evaluate', { expression: `JSON.stringify((${expression}), (key, value) => typeof value === 'object' && value instanceof Element ? undefined : value)`, returnByValue: true });
+    if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails).slice(0, 1200));
+    return result.result?.value == null ? result.result?.value : JSON.parse(result.result.value);
   }
 }
 
@@ -133,12 +133,12 @@ try {
   await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve));
   const mockPort = upstream.address().port;
   const created = await api('/api/providers', { method: 'POST', body: {
-    name: 'UI error detail check', apiType: 'openai', baseUrl: `http://127.0.0.1:${mockPort}/v1`, apiKey: errorSecret,
+    name: 'UI error detail check', requestFormat: 'openai_chat', baseUrl: `http://127.0.0.1:${mockPort}/v1`, apiKey: errorSecret,
     model: 'ui-error-detail-model', intervalSeconds: 300, timeoutMs: 5000, failureThreshold: 1, recoveryThreshold: 1,
   } });
   mockProviderId = created.data.id;
   const providerList = (await api('/api/providers')).data;
-  mockModelId = providerList.find((item) => item.id === mockProviderId).model.id;
+  mockModelId = providerList.find((item) => item.id === mockProviderId).models[0].id;
   const failedCheck = await api(`/api/models/${mockModelId}/check`, { method: 'POST', body: {} });
   assert.equal(failedCheck.data.errorType, 'AUTH_ERROR');
   assert.equal(failedCheck.data.status, 'DOWN');
@@ -182,11 +182,10 @@ try {
   const editorDeadline = Date.now() + 5000;
   while (Date.now() < editorDeadline && !await client.evaluate(`Boolean(document.querySelector('.provider-editor'))`)) await wait(100);
   assert.ok(await client.evaluate(`Boolean(document.querySelector('.provider-editor'))`), 'provider editor should open on mobile');
-  await client.evaluate(`(() => { const label = Array.from(document.querySelectorAll('.provider-editor label')).find((item) => item.textContent?.includes('Check interval')); const select = label?.querySelector('select'); if (!select) return false; select.value = 'custom'; select.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
-  assert.ok(await client.evaluate(`document.querySelector('.provider-editor')?.innerText.includes('Custom interval (seconds)')`), 'provider editor should offer a custom interval');
-  await client.evaluate(`document.querySelectorAll('.provider-editor .editor-tabs button')[1]?.click()`);
-  await client.evaluate(`(() => { const label = Array.from(document.querySelectorAll('.provider-editor label')).find((item) => item.textContent?.includes('Floating threshold')); const select = label?.querySelector('select'); if (!select) return false; select.value = 'custom'; select.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
-  assert.ok(await client.evaluate(`document.querySelector('.provider-editor')?.innerText.includes('Custom threshold (%)')`), 'provider editor should offer a custom floating threshold');
+  assert.ok(await client.evaluate(`Boolean(document.querySelector('.provider-editor')?.innerText.includes('OpenAI Chat Completions'))`), 'provider editor should expose selectable request formats');
+  assert.ok(await client.evaluate(`Boolean(document.querySelector('.provider-editor form'))`), 'provider editor should render its form');
+  await client.evaluate(`(() => { const button = Array.from(document.querySelectorAll('.provider-editor button')).find((item) => item.textContent?.includes('Save changes')); if (button) button.click(); return Boolean(button); })()`);
+  await wait(700);
   const editorMetrics = await client.evaluate(`({ route: '/providers/editor', theme: document.documentElement.dataset.theme, viewport: innerWidth, contentWidth: document.documentElement.clientWidth, documentWidth: document.documentElement.scrollWidth, bodyWidth: document.body.scrollWidth, pageTitle: 'Provider editor' })`);
   assert.ok(editorMetrics.documentWidth <= editorMetrics.contentWidth && editorMetrics.bodyWidth <= editorMetrics.contentWidth, 'provider editor overflows on mobile');
   const editorShot = await client.command('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, fromSurface: true });

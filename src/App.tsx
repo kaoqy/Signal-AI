@@ -31,6 +31,10 @@ const statusLabels: Record<string, string> = {
   UNKNOWN: 'Unknown', UNKNOWN_RESPONSE: 'Unparsed', DEGRADED: 'Degraded', RECOVERING: 'Recovering',
 };
 const apiTypeLabels: Record<string, string> = { openai: 'OpenAI Compatible', gemini: 'Gemini', anthropic: 'Anthropic', custom: 'Custom API' };
+const formatLabels: Record<string, string> = {
+  openai_chat: 'OpenAI Chat Completions', openai_responses: 'OpenAI Responses',
+  anthropic_messages: 'Anthropic Messages', gemini_generate: 'Gemini generateContent',
+};
 const rangeLabels: Record<string, string> = { '1h': '1 hour', '6h': '6 hours', '24h': '24 hours', '7d': '7 days', '30d': '30 days' };
 
 function App() {
@@ -229,7 +233,7 @@ function App() {
   const content = path.startsWith('/admin/models/') && detail ? <ModelDetail model={detail} checks={detailChecks} range={detailRange} setRange={setDetailRange} onBack={() => navigate('/admin/models')} onCheck={() => forceCheck(detail.id)} loading={loading} />
     : path === '/admin/models' ? <ModelsPage models={models} providers={providers} onBatch={batch} onCheck={forceCheck} onOpen={(id) => navigate(`/admin/models/${id}`)} />
       : path === '/admin/incidents' ? <IncidentsPage incidents={incidents} onOpen={(id) => navigate(`/admin/models/${id}`)} />
-        : path === '/admin/providers' ? <ProvidersPage providers={providers} onAdd={() => setProviderModal('new')} onEdit={(provider) => setProviderModal(provider)} onRefresh={() => void refresh(true)} notify={notify} />
+        : path === '/admin/providers' ? <ProvidersPage providers={providers} onAdd={() => setProviderModal('new')} onEdit={(provider) => setProviderModal(provider)} onOpenModel={(id) => navigate(`/admin/models/${id}`)} onRefresh={() => void refresh(true)} notify={notify} />
           : path === '/admin/settings' ? <SettingsPage settings={settings} notifications={notifications} onSave={saveSettings} onSaveNotification={saveNotification} onRefresh={() => void refresh(true)} notify={notify} />
             : <DashboardPage models={models} summary={summary} incidents={incidents} onOpen={(id) => navigate(`/admin/models/${id}`)} onModels={() => navigate('/admin/models')} onProvider={() => setProviderModal('new')} />;
 
@@ -369,7 +373,7 @@ function dateTime(date: string | null | undefined): string {
 function ModelList({ models, onOpen }: { models: Model[]; onOpen: (id: string) => void }) {
   return <div className="model-list">{models.map((model) => <button className="model-row" key={model.id} onClick={() => onOpen(model.id)}>
     <span className={`model-provider-mark ${model.api_type}`}><ProviderGlyph type={model.api_type} /></span>
-    <span className="model-row-main"><strong>{model.name}</strong><span>{model.provider_name} <b>{tr("·")}</b> {tr(apiTypeLabels[model.api_type])}</span></span>
+    <span className="model-row-main"><strong>{model.name}</strong><span>{model.provider_name} <b>{tr("·")}</b> {tr(formatLabels[model.request_format] ?? apiTypeLabels[model.api_type])}</span></span>
     <span className="model-row-latency"><strong>{model.last_latency_ms == null ? '—' : formatMs(model.last_latency_ms)}</strong><span>{timeAgo(model.last_checked_at)}</span></span>
     <StatusBadge status={model.enabled ? model.current_status : 'DISABLED'} />
     <ChevronRight className="row-chevron" size={16} />
@@ -399,7 +403,7 @@ function ModelsPage({ models, providers, onBatch, onCheck, onOpen }: { models: M
     {selected.length > 0 && <div className="bulk-toolbar"><span>{selected.length} {tr("selected")}</span><button onClick={() => onBatch('enable', selected)}>{tr("Enable")}</button><button onClick={() => onBatch('disable', selected)}>{tr("Disable")}</button><button onClick={() => onBatch('check', selected)}>{tr("Force check")}</button><button className="danger-text" onClick={() => onBatch('delete', selected)}>{tr("Delete")}</button><button className="bulk-clear" onClick={() => setSelected([])}>{tr("Clear")}</button></div>}
     <div className="data-card"><div className="list-heading"><label className="checkbox-control"><input type="checkbox" checked={allSelected} onChange={() => setSelected(allSelected ? [] : filtered.map((model) => model.id))} /><span /></label><span>{tr("MODEL / PROVIDER")}</span><span>{tr("STATUS")}</span><span>{tr("LATENCY")}</span><span>{tr("LAST CHECKED")}</span><span>{tr("ACTIONS")}</span></div>
       {filtered.map((model) => <div className="data-row" key={model.id}><label className="checkbox-control"><input type="checkbox" checked={selected.includes(model.id)} onChange={() => setSelected((items) => items.includes(model.id) ? items.filter((id) => id !== model.id) : [...items, model.id])} /><span /></label>
-        <button className="data-model" onClick={() => onOpen(model.id)}><span className={`model-provider-mark ${model.api_type}`}><ProviderGlyph type={model.api_type} /></span><span><strong>{model.name}</strong><small>{model.provider_name} <b>{tr("·")}</b> {tr(apiTypeLabels[model.api_type])}</small></span></button>
+        <button className="data-model" onClick={() => onOpen(model.id)}><span className={`model-provider-mark ${model.api_type}`}><ProviderGlyph type={model.api_type} /></span><span><strong>{model.name}</strong><small>{model.provider_name} <b>{tr("·")}</b> {tr(formatLabels[model.request_format] ?? apiTypeLabels[model.api_type])}</small></span></button>
         <div><StatusBadge status={model.enabled ? model.current_status : 'DISABLED'} small /></div><strong className="data-latency">{model.last_latency_ms == null ? '—' : formatMs(model.last_latency_ms)}</strong><span className="muted-text">{timeAgo(model.last_checked_at)}</span>
         <div className="data-actions"><button className="icon-button tiny" title={tr("Force check")} onClick={() => onCheck(model.id)}><RefreshCw size={15} /></button><button className="icon-button tiny" title={tr("Open details")} onClick={() => onOpen(model.id)}><ChevronRight size={16} /></button></div>
       </div>)}
@@ -409,53 +413,59 @@ function ModelsPage({ models, providers, onBatch, onCheck, onOpen }: { models: M
   </>;
 }
 
-function ProvidersPage({ providers, onAdd, onEdit, onRefresh, notify }: { providers: Provider[]; onAdd: () => void; onEdit: (provider: Provider) => void; onRefresh: () => void; notify: (message: string, kind?: 'success' | 'error') => void }) {
+function ProvidersPage({ providers, onAdd, onEdit, onOpenModel, onRefresh, notify }: { providers: Provider[]; onAdd: () => void; onEdit: (provider: Provider) => void; onOpenModel: (id: string) => void; onRefresh: () => void; notify: (message: string, kind?: 'success' | 'error') => void }) {
   async function remove(provider: Provider) {
-    if (!window.confirm(`Delete ${provider.name} and its model history? This cannot be undone.`)) return;
-    try { await api(`/api/providers/${provider.id}`, { method: 'DELETE' }); onRefresh(); notify(`${provider.name} deleted.`); }
+    if (!window.confirm(tr('Delete this provider and all of its model history? This cannot be undone.'))) return;
+    try { await api(`/api/providers/${provider.id}`, { method: 'DELETE' }); onRefresh(); notify(getLanguage() === 'zh-CN' ? `${provider.name} 已删除。` : `${provider.name} deleted.`); }
     catch (error) { notify(error instanceof Error ? error.message : 'Could not delete provider.', 'error'); }
   }
+  async function addModel(provider: Provider, name: string) {
+    try { await api(`/api/providers/${provider.id}/models`, { method: 'POST', body: JSON.stringify({ model: name }) }); onRefresh(); notify(getLanguage() === 'zh-CN' ? '模型已添加。' : 'Model added.'); }
+    catch (error) { notify(error instanceof Error ? error.message : 'Could not add model.', 'error'); }
+  }
+  async function removeModel(model: Model) {
+    try { await api(`/api/models/${model.id}`, { method: 'DELETE' }); onRefresh(); notify(getLanguage() === 'zh-CN' ? '模型已删除。' : 'Model deleted.'); }
+    catch (error) { notify(error instanceof Error ? error.message : 'Could not delete model.', 'error'); }
+  }
   return <>
-    <PageHeading eyebrow="CONNECTIONS" title={tr("Providers")} description="Connect your AI APIs and configure exactly how each model is probed."
+    <PageHeading eyebrow="CONNECTIONS" title={tr("Providers")} description="Connect an AI endpoint once, then add all models you want monitored."
       action={<button className="button primary" onClick={onAdd}><Plus size={16} /> {tr("Add provider")}</button>} />
     <div className="provider-note"><KeyRound size={16} /><span><strong>{tr("Your API keys are encrypted at rest.")}</strong> {tr("They are never returned to the browser after saving.")}</span><ShieldCheck size={15} className="note-check" /></div>
     {providers.length ? <div className="provider-grid">{providers.map((provider) => <div className="provider-card" key={provider.id}>
-      <div className="provider-card-top"><span className={`provider-logo ${provider.api_type}`}><ProviderGlyph type={provider.api_type} /></span><span className="provider-card-label"><strong>{provider.name}</strong><span>{tr(apiTypeLabels[provider.api_type])}</span></span><button className="icon-button tiny" title={tr("More provider actions")} onClick={() => onEdit(provider)}><MoreHorizontal size={18} /></button></div>
-      <div className="provider-card-model"><span className={`status-dot ${provider.model?.current_status?.toLowerCase() ?? 'unknown'}`} /> <span>{provider.model?.name ?? tr('No model configured')}</span><StatusBadge status={provider.model?.enabled ? provider.model?.current_status ?? 'UNKNOWN' : 'DISABLED'} small /></div>
+      <div className="provider-card-top"><span className={`provider-logo ${provider.api_type}`}><ProviderGlyph type={provider.api_type} /></span><span className="provider-card-label"><strong>{provider.name}</strong><span>{tr(formatLabels[provider.request_format])}</span></span><button className="icon-button tiny" title={tr("Edit provider")} onClick={() => onEdit(provider)}><MoreHorizontal size={18} /></button></div>
+      <div className="provider-model-list">{provider.models.map((model) => <div className="provider-card-model" key={model.id}>
+        <button className="provider-model-name" onClick={() => onOpenModel(model.id)} title={tr("Open details")}><span className={`status-dot ${model.current_status?.toLowerCase() ?? 'unknown'}`} /> <span>{model.name}</span></button>
+        <StatusBadge status={model.enabled ? model.current_status : 'DISABLED'} small />
+        <strong className="provider-model-latency">{model.last_latency_ms == null ? '—' : formatMs(model.last_latency_ms)}</strong>
+        <button className="icon-button tiny danger-hover" title={tr("Remove model")} onClick={() => void removeModel(model)}><Trash2 size={13} /></button>
+      </div>)}
+      {!provider.models.length && <span className="provider-model-empty">{tr('No models added yet')}</span>}
+      <form className="provider-add-model" onSubmit={(event) => { event.preventDefault(); const input = event.currentTarget.elements.namedItem('modelName') as HTMLInputElement; if (!input.value.trim()) return; void addModel(provider, input.value.trim()); input.value = ''; }}>
+        <input name="modelName" placeholder={tr('Add model name')} required />
+        <button className="button secondary tiny-button" type="submit"><Plus size={13} /> {tr('Add')}</button>
+      </form>
+      </div>
       <div className="provider-card-url" title={provider.base_url}><Globe2 size={13} />{provider.base_url}</div>
       <div className="provider-card-footer"><span>{provider.apiKeySet ? <><KeyRound size={13} /> {provider.keyHint}</> : <><CircleHelp size={13} /> {tr("No API key")}</>}</span><div><button className="text-button compact" onClick={() => onEdit(provider)}>{tr("Edit")}</button><button className="icon-button tiny danger-hover" title={tr("Delete provider")} onClick={() => void remove(provider)}><Trash2 size={14} /></button></div></div>
-    </div>)}</div> : <EmptyState icon={<Globe2 size={20} />} title={tr("No providers connected")} description="Connect an OpenAI-compatible API, Gemini, Anthropic or a custom endpoint." action={<button className="button primary" onClick={onAdd}><Plus size={16} /> {tr("Connect your first provider")}</button>} />}
+    </div>)}</div> : <EmptyState icon={<Globe2 size={20} />} title={tr("No providers connected")} description="Connect an OpenAI-compatible API, Gemini or Anthropic endpoint." action={<button className="button primary" onClick={onAdd}><Plus size={16} /> {tr("Connect your first provider")}</button>} />}
   </>;
 }
 
 type ProviderDraft = Record<string, string | number | boolean>;
 const intervalPresets: Array<[number, string]> = [[60, '1 minute'], [120, '2 minutes'], [300, '5 minutes'], [600, '10 minutes'], [900, '15 minutes'], [1800, '30 minutes'], [3600, '1 hour'], [21600, '6 hours'], [43200, '12 hours'], [86400, '24 hours']];
-const floatingPresets = [10, 20, 30, 50, 100];
 const defaultDraft: ProviderDraft = {
-  name: '', apiType: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: '', model: '', intervalSeconds: 300,
-  jitterSeconds: 0, timeoutMs: 15000, prompt: 'Reply with exactly: OK', maxTokens: 5, temperature: 0,
-  warningLatencyMs: 3000, criticalLatencyMs: 8000, floatingEnabled: false, floatingPercent: 50, baselineMethod: 'trimmed_average', baselineSamples: 20,
-  failureThreshold: 3, recoveryThreshold: 2, actualCall: true, enabled: true, method: 'POST', path: '', body: '', expectedStatus: '200', responsePath: '',
+  name: '', requestFormat: 'openai_chat', baseUrl: 'https://api.openai.com/v1', apiKey: '', model: '', intervalSeconds: 300,
+  timeoutMs: 15000, prompt: 'Reply with exactly: OK', maxTokens: 5, enabled: true,
 };
 
 function ProviderModal({ provider, onClose, onSaved, notify }: { provider: Provider | null; onClose: () => void; onSaved: (message: string) => void; notify: (message: string, kind?: 'success' | 'error') => void }) {
-  const [draft, setDraft] = useState<ProviderDraft>(() => {
-    const model = provider?.model;
-    return provider ? {
-      ...defaultDraft, name: provider.name, apiType: provider.api_type, baseUrl: provider.base_url, apiKey: '', model: model?.name ?? '',
-      intervalSeconds: model?.interval_seconds ?? 300, jitterSeconds: (model as any)?.jitter_seconds ?? 0, timeoutMs: (model as any)?.timeout_ms ?? 15000,
-      prompt: (model as any)?.prompt ?? defaultDraft.prompt, maxTokens: (model as any)?.max_tokens ?? 5, temperature: (model as any)?.temperature ?? 0,
-      warningLatencyMs: model?.warning_latency_ms ?? 3000, criticalLatencyMs: model?.critical_latency_ms ?? 8000,
-      floatingEnabled: Boolean((model as any)?.floating_enabled), floatingPercent: (model as any)?.floating_percent ?? 50, baselineMethod: (model as any)?.baseline_method ?? 'trimmed_average',
-      baselineSamples: (model as any)?.baseline_samples ?? 20, failureThreshold: (model as any)?.failure_threshold ?? 3, recoveryThreshold: (model as any)?.recovery_threshold ?? 2,
-      actualCall: Boolean((model as any)?.actual_call ?? true), enabled: Boolean(model?.enabled ?? true), method: provider.custom_method, path: provider.custom_path,
-      body: provider.custom_body, expectedStatus: JSON.parse(provider.expected_status_json || '[200]').join(','), responsePath: provider.response_path,
-    } : defaultDraft;
-  });
-  const [customInterval, setCustomInterval] = useState(() => Boolean(provider?.model && !intervalPresets.some(([seconds]) => seconds === provider.model?.interval_seconds)));
-  const [customFloating, setCustomFloating] = useState(() => Boolean(provider?.model && !floatingPresets.includes((provider.model as any).floating_percent ?? 50)));
-  const [headersText, setHeadersText] = useState(() => JSON.stringify(provider?.headers ?? {}, null, 2));
-  const [tab, setTab] = useState<'basic' | 'advanced'>('basic');
+  const model = provider?.models[0];
+  const [draft, setDraft] = useState<ProviderDraft>(() => provider ? {
+    ...defaultDraft, name: provider.name, requestFormat: provider.request_format, baseUrl: provider.base_url, apiKey: '',
+  } : defaultDraft);
+  const [customInterval, setCustomInterval] = useState(() => Boolean(model && !intervalPresets.some(([seconds]) => seconds === model.interval_seconds)));
+  const [newModel, setNewModel] = useState('');
+  const [addingModel, setAddingModel] = useState(false);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testResult, setTestResult] = useState<Record<string, any> | null>(null);
@@ -466,66 +476,79 @@ function ProviderModal({ provider, onClose, onSaved, notify }: { provider: Provi
     event.preventDefault();
     setSaving(true);
     try {
-      const headers = JSON.parse(headersText || '{}') as Record<string, string>;
-      const payload = { ...draft, providerId: provider?.id, headers, expectedStatus: String(val('expectedStatus')).split(',').map((item) => Number(item.trim())).filter(Boolean) };
+      const payload: Record<string, unknown> = {
+        name: draft.name, requestFormat: draft.requestFormat, baseUrl: draft.baseUrl,
+        apiKey: draft.apiKey, enabled: draft.enabled, headers: provider ? provider.headers : {},
+      };
+      if (!provider || draft.model) payload.model = draft.model;
+      if (!provider || draft.model) Object.assign(payload, {
+        intervalSeconds: draft.intervalSeconds, timeoutMs: draft.timeoutMs, prompt: draft.prompt, maxTokens: draft.maxTokens,
+      });
       await api(provider ? `/api/providers/${provider.id}` : '/api/providers', { method: provider ? 'PUT' : 'POST', body: JSON.stringify(payload) });
-      onSaved(provider ? 'Provider updated.' : 'Provider added and ready to monitor.');
-    } catch (error) { notify(error instanceof Error ? error.message : 'Could not save provider.', 'error'); }
+      onSaved(provider ? tr('Provider updated.') : tr('Provider added and ready to monitor.'));
+    } catch (error) { notify(error instanceof Error ? error.message : tr('Could not save provider.'), 'error'); }
     finally { setSaving(false); }
   }
 
-  async function testConnection() {
+  async function testConnection(modelName = '') {
     setTesting(true); setTestResult(null);
     try {
-      const headers = JSON.parse(headersText || '{}') as Record<string, string>;
-      const result = await api<Record<string, any>>('/api/providers/test', { method: 'POST', body: JSON.stringify({ ...draft, providerId: provider?.id, headers, expectedStatus: String(val('expectedStatus')).split(',').map((item) => Number(item.trim())).filter(Boolean) }) });
+      const result = await api<Record<string, any>>('/api/providers/test', { method: 'POST', body: JSON.stringify({
+        providerId: provider?.id, name: draft.name, requestFormat: draft.requestFormat, baseUrl: draft.baseUrl,
+        apiKey: draft.apiKey, model: modelName || draft.model || model?.name || '', intervalSeconds: draft.intervalSeconds,
+        timeoutMs: draft.timeoutMs, prompt: draft.prompt, maxTokens: draft.maxTokens, headers: provider ? provider.headers : {},
+      }) });
       setTestResult(result);
-    } catch (error) { setTestResult({ success: false, error: error instanceof Error ? error.message : 'Connection test failed.' }); }
+    } catch (error) { setTestResult({ success: false, error: error instanceof Error ? error.message : tr('Connection test failed.') }); }
     finally { setTesting(false); }
+  }
+
+  async function addModel(event: FormEvent) {
+    event.preventDefault();
+    if (!provider || !newModel.trim()) return;
+    setAddingModel(true);
+    try {
+      await api(`/api/providers/${provider.id}/models`, { method: 'POST', body: JSON.stringify({ model: newModel.trim() }) });
+      setNewModel('');
+      onSaved(tr('Model added.'));
+    } catch (error) { notify(error instanceof Error ? error.message : tr('Could not add model.'), 'error'); }
+    finally { setAddingModel(false); }
   }
 
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="modal provider-editor" role="dialog" aria-modal="true" aria-labelledby="provider-modal-title">
     <div className="modal-header"><div><div className="page-eyebrow">{tr(provider ? 'CONFIGURATION' : 'NEW CONNECTION')}</div><h2 id="provider-modal-title">{tr(provider ? 'Edit provider' : 'Add provider')}</h2></div><button className="icon-button" onClick={onClose} aria-label={tr("Close")}><X size={18} /></button></div>
-    <div className="editor-tabs"><button className={tab === 'basic' ? 'selected' : ''} onClick={() => setTab('basic')}>{tr("Basic setup")}</button><button className={tab === 'advanced' ? 'selected' : ''} onClick={() => setTab('advanced')}>{tr("Advanced")}</button></div>
     <form onSubmit={submit}>
-      <div className="modal-body">
-        {tab === 'basic' ? <div className="form-grid">
-          <label className="span-2">{tr("Provider name")}<input value={val('name')} onChange={(event) => change('name', event.target.value)} placeholder={tr("e.g. OpenRouter Production")} required /></label>
-          <label>{tr("API type")}<select value={val('apiType')} onChange={(event) => { change('apiType', event.target.value); if (event.target.value === 'gemini') change('baseUrl', 'https://generativelanguage.googleapis.com/v1beta'); else if (event.target.value === 'anthropic') change('baseUrl', 'https://api.anthropic.com'); else if (event.target.value === 'openai') change('baseUrl', 'https://api.openai.com/v1'); }}><option value="openai">{tr("OpenAI Compatible")}</option><option value="gemini">{tr("Gemini")}</option><option value="anthropic">{tr("Anthropic")}</option><option value="custom">{tr("Custom API")}</option></select></label>
+      <div className="modal-body"><div className="form-grid">
+        <label className="span-2">{tr("Provider name")}<input value={val('name')} onChange={(event) => change('name', event.target.value)} placeholder={tr("e.g. OpenRouter Production")} required /></label>
+        <label className="span-2">{tr("Request format")}<select value={val('requestFormat')} onChange={(event) => { const next = event.target.value; change('requestFormat', next); if (next === 'gemini_generate') change('baseUrl', 'https://generativelanguage.googleapis.com/v1beta'); else if (next === 'anthropic_messages') change('baseUrl', 'https://api.anthropic.com'); else change('baseUrl', 'https://api.openai.com/v1'); }}>
+          <option value="openai_chat">{tr("OpenAI Chat Completions")}</option>
+          <option value="openai_responses">{tr("OpenAI Responses")}</option>
+          <option value="anthropic_messages">{tr("Anthropic Messages")}</option>
+          <option value="gemini_generate">{tr("Gemini generateContent")}</option>
+        </select><small>{tr("Request paths, headers and bodies are built automatically.")}</small></label>
+        <label className="span-2">{tr("API base URL")}<input type="url" value={val('baseUrl')} onChange={(event) => change('baseUrl', event.target.value)} placeholder={tr("https://api.example.com/v1")} required /><small>{tr("Use the provider root, for example https://openrouter.ai/api/v1.")}</small></label>
+        <label className="span-2">{tr("API key ")}<input type="password" value={val('apiKey')} onChange={(event) => change('apiKey', event.target.value)} placeholder={provider?.keyHint ? getLanguage() === 'zh-CN' ? `已加密保存 · ${provider.keyHint} · 留空表示不修改` : `Saved securely · ${provider.keyHint} · leave blank to keep` : tr('Paste your API key')} autoComplete="new-password" /><small>{tr("Sent once, encrypted before storage, and never shown again.")}</small></label>
+        {provider ? <>
+          <div className="form-separator span-2"><span>{tr("MODELS")}</span></div>
+          <div className="span-2 model-manage-list">{provider.models.map((item) => <div className="model-manage-row" key={item.id}><StatusBadge status={item.enabled ? item.current_status : 'DISABLED'} small /><strong>{item.name}</strong><span>{item.last_latency_ms == null ? '—' : formatMs(item.last_latency_ms)}</span></div>)}
+            <form className="provider-add-model" onSubmit={addModel}><input value={newModel} onChange={(event) => setNewModel(event.target.value)} placeholder={tr('Add another model name')} required /><button className="button secondary tiny-button" type="submit" disabled={addingModel}>{addingModel ? <LoaderCircle size={13} className="spin" /> : <><Plus size={13} /> {tr('Add')}</>}</button></form>
+          </div>
+        </> : <>
+          <div className="form-separator span-2"><span>{tr("FIRST MODEL")}</span></div>
           <label>{tr("Model name")}<input value={val('model')} onChange={(event) => change('model', event.target.value)} placeholder={tr("e.g. gpt-4o-mini")} required /></label>
-          <label className="span-2">{tr("API base URL")}<input type="url" value={val('baseUrl')} onChange={(event) => change('baseUrl', event.target.value)} placeholder={tr("https://api.example.com/v1")} required /><small>{tr("HTTPS is required for public endpoints. API paths are appended automatically.")}</small></label>
-          <label className="span-2">{tr("API key ")}<input type="password" value={val('apiKey')} onChange={(event) => change('apiKey', event.target.value)} placeholder={provider?.keyHint ? getLanguage() === 'zh-CN' ? `已加密保存 · ${provider.keyHint} · 留空表示不修改` : `Saved securely · ${provider.keyHint} · leave blank to keep` : tr('Paste your API key')} autoComplete="new-password" /><small>{tr("Sent once, encrypted before storage, and never shown again.")}</small></label>
-          <div className="form-separator span-2"><span>{tr("CHECK BEHAVIOR")}</span></div>
           <label>{tr("Check interval")}<select value={customInterval ? 'custom' : String(val('intervalSeconds'))} onChange={(event) => { if (event.target.value === 'custom') setCustomInterval(true); else { setCustomInterval(false); change('intervalSeconds', Number(event.target.value)); } }}>{intervalPresets.map(([seconds, label]) => <option key={seconds} value={seconds}>{tr(label)}</option>)}<option value="custom">{tr("Custom interval")}</option></select></label>
-          {customInterval && <label>{tr("Custom interval (seconds)")}<input type="number" min="60" max="86400" step="1" value={val('intervalSeconds')} onChange={(event) => change('intervalSeconds', Number(event.target.value))} /><small>{tr("Choose any interval from 60 seconds to 24 hours.")}</small></label>}
+          {customInterval && <label className="span-2">{tr("Custom interval (seconds)")}<input type="number" min="60" max="86400" step="1" value={val('intervalSeconds')} onChange={(event) => change('intervalSeconds', Number(event.target.value))} /><small>{tr("Choose any interval from 60 seconds to 24 hours. You can set this separately for each model later.")}</small></label>}
           <label>{tr("Timeout")}<select value={val('timeoutMs')} onChange={(event) => change('timeoutMs', Number(event.target.value))}>{[[5000, '5 seconds'], [10000, '10 seconds'], [15000, '15 seconds'], [30000, '30 seconds'], [60000, '60 seconds'], [120000, '120 seconds']].map(([ms, label]) => <option value={ms} key={ms}>{tr(String(label))}</option>)}</select></label>
-          <label>{tr("Warning latency")}<input type="number" min="1" value={val('warningLatencyMs')} onChange={(event) => change('warningLatencyMs', Number(event.target.value))} /><small>{tr("Requests above this mark as slow.")}</small></label>
-          <label>{tr("Critical latency")}<input type="number" min="2" value={val('criticalLatencyMs')} onChange={(event) => change('criticalLatencyMs', Number(event.target.value))} /><small>{tr("Requests above this count as an outage.")}</small></label>
           <label className="span-2">{tr("Detection prompt")}<textarea rows={2} value={val('prompt')} onChange={(event) => change('prompt', event.target.value)} /></label>
-        </div> : <div className="form-grid">
-          <label className="span-2">{tr("Custom request method")}<select value={val('method')} onChange={(event) => change('method', event.target.value)}><option>{tr("POST")}</option><option>{tr("GET")}</option><option>{tr("PUT")}</option><option>{tr("PATCH")}</option></select></label>
-          <label className="span-2">{tr("Custom path")}<input value={val('path')} onChange={(event) => change('path', event.target.value)} placeholder={tr("/chat/completions")} /><small>{tr("Relative to the base URL. Use ")}{'{{model}}'}{tr(", ")}{'{{prompt}}'}{tr(", and ")}{'{{max_tokens}}'} {tr("in body.")}</small></label>
-          <label className="span-2">{tr("Custom request body")}<textarea rows={5} value={val('body')} onChange={(event) => change('body', event.target.value)} placeholder={provider?.customBodySet ? 'A request body is saved encrypted. Leave blank to keep it or enter a replacement.' : '{"model":"{{model}}","messages":[{"role":"user","content":"{{prompt}}"}],"max_tokens":{{max_tokens}}}'} /><small>{tr("Saved custom bodies are encrypted and are not returned to the browser.")}</small></label>
-          <label className="span-2">{tr("Custom headers (JSON)")}<textarea rows={4} value={headersText} onChange={(event) => setHeadersText(event.target.value)} placeholder={'{"HTTP-Referer":"https://example.com","X-Title":"My App"}'} /><small>{tr("Authorization, API key, token and cookie header values are encrypted separately.")}</small></label>
-          <label>{tr("Expected HTTP status")}<input value={val('expectedStatus')} onChange={(event) => change('expectedStatus', event.target.value)} placeholder={tr("200, 201")} /></label>
-          <label>{tr("Response text path")}<input value={val('responsePath')} onChange={(event) => change('responsePath', event.target.value)} placeholder={tr("choices[0].message.content")} /></label>
-          <label>{tr("Max output tokens")}<input type="number" min="1" max="4096" value={val('maxTokens')} onChange={(event) => change('maxTokens', Number(event.target.value))} /></label>
-          <label>{tr("Temperature")}<input type="number" min="0" max="2" step="0.1" value={val('temperature')} onChange={(event) => change('temperature', Number(event.target.value))} /></label>
-          <label>{tr("Request jitter (± seconds)")}<input type="number" min="0" value={val('jitterSeconds')} onChange={(event) => change('jitterSeconds', Number(event.target.value))} /></label>
-          <label>{tr("Failure threshold")}<select value={val('failureThreshold')} onChange={(event) => change('failureThreshold', Number(event.target.value))}>{[1, 2, 3, 5, 10].map((value) => <option key={value} value={value}>{value} {tr("consecutive failures")}</option>)}</select></label>
-          <label>{tr("Recovery threshold")}<select value={val('recoveryThreshold')} onChange={(event) => change('recoveryThreshold', Number(event.target.value))}>{[1, 2, 3, 5, 10].map((value) => <option key={value} value={value}>{value} {tr("consecutive successes")}</option>)}</select></label>
-          <label>{tr("Floating baseline")}<select value={val('baselineMethod')} onChange={(event) => change('baselineMethod', event.target.value)}><option value="trimmed_average">{tr("Trimmed average (recommended)")}</option><option value="rolling_average">{tr("Rolling average")}</option><option value="median">{tr("Median")}</option><option value="p95">{tr("P95")}</option></select></label>
-          <label>{tr("Baseline samples")}<input type="number" min="5" max="500" value={val('baselineSamples')} onChange={(event) => change('baselineSamples', Number(event.target.value))} /></label>
-          <label>{tr("Floating threshold (%)")}<select value={customFloating ? 'custom' : String(val('floatingPercent'))} onChange={(event) => { if (event.target.value === 'custom') setCustomFloating(true); else { setCustomFloating(false); change('floatingPercent', Number(event.target.value)); } }}>{floatingPresets.map((value) => <option key={value} value={value}>{value}{tr("% above baseline")}</option>)}<option value="custom">{tr("Custom percentage")}</option></select></label>
-          {customFloating && <label>{tr("Custom threshold (%)")}<input type="number" min="1" max="1000" step="0.1" value={val('floatingPercent')} onChange={(event) => change('floatingPercent', Number(event.target.value))} /></label>}
-          <label className="toggle-line"><input type="checkbox" checked={draft.floatingEnabled === true} onChange={(event) => change('floatingEnabled', event.target.checked)} /><span className="toggle-ui" /><span>{tr("Enable dynamic latency threshold")}</span></label>
-          <label className="toggle-line"><input type="checkbox" checked={draft.actualCall === true} onChange={(event) => change('actualCall', event.target.checked)} /><span className="toggle-ui" /><span>{tr("Make a real model request")}</span></label>
-          <label className="toggle-line"><input type="checkbox" checked={draft.enabled === true} onChange={(event) => change('enabled', event.target.checked)} /><span className="toggle-ui" /><span>{tr("Enable scheduled checks")}</span></label>
-        </div>}
-      {testResult && <div className={`test-result ${testResult.success ? 'success' : 'error'}`}><div className="test-result-heading">{testResult.success ? <Check size={16} /> : <AlertCircle size={16} />}{testResult.success ? tr('Connection successful') : tr('Connection failed')}<span>{testResult.statusCode ? `HTTP ${testResult.statusCode}` : ''}</span></div>
-          <p>{testResult.error ?? `${formatMs(testResult.latency)} response${testResult.ttft == null ? '' : ` · ${formatMs(testResult.ttft)} TTFT`}${testResult.response ? ` · “${testResult.response}”` : ''}`}</p>{testResult.errorType && <small>{testResult.errorType}</small>}</div>}
+        </>}
       </div>
-      <div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>{tr("Cancel")}</button><button type="button" className="button outline" onClick={testConnection} disabled={testing || !val('baseUrl') || !val('model')}><Zap size={15} />{testing ? tr('Testing…') : tr('Test connection')}</button><button className="button primary" type="submit" disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />}{provider ? tr('Save changes') : tr('Add provider')}</button></div>
+      {testResult && <div className={`test-result ${testResult.success ? 'success' : 'error'}`}><div className="test-result-heading">{testResult.success ? <Check size={16} /> : <AlertCircle size={16} />}{testResult.success ? tr('Connection successful') : tr('Connection failed')}<span>{testResult.statusCode ? `HTTP ${testResult.statusCode}` : ''}</span></div>
+        <p>{testResult.error ?? `${formatMs(testResult.latency)} response${testResult.ttft == null ? '' : ` · ${formatMs(testResult.ttft)} TTFT`}${testResult.response ? ` · “${testResult.response}”` : ''}`}</p>{testResult.errorType && <small>{testResult.errorType}</small>}</div>}
+      </div>
+      <div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>{tr("Cancel")}</button>
+        {!provider && <button type="button" className="button outline" onClick={() => void testConnection()} disabled={testing || !val('baseUrl') || !val('model')}><Zap size={15} />{testing ? tr('Testing…') : tr('Test connection')}</button>}
+        {provider && provider.models[0] && <button type="button" className="button outline" onClick={() => void testConnection(provider.models[0]!.name)} disabled={testing}><Zap size={15} />{testing ? tr('Testing…') : tr('Test connection')}</button>}
+        <button className="button primary" type="submit" disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />}{provider ? tr('Save changes') : tr('Add provider')}</button></div>
     </form>
   </div></div>;
 }
@@ -538,7 +561,7 @@ function ModelDetail({ model, checks, range, setRange, onBack, onCheck, loading 
   const hourlyBars = [...checks].slice(-48);
   return <>
     <button className="back-link" onClick={onBack}><ChevronLeft size={16} /> {tr("All models")}</button>
-    <div className="detail-heading"><div className={`model-provider-mark large ${model.api_type}`}><ProviderGlyph type={model.api_type} /></div><div className="detail-heading-main"><div className="detail-breadcrumb">{model.provider_name} <ChevronRight size={13} /> {tr(apiTypeLabels[model.api_type])}</div><h1>{model.name}</h1><div className="detail-heading-meta"><StatusBadge status={model.enabled ? model.current_status : 'DISABLED'} /><span>{tr("Last checked ")}{timeAgo(model.last_checked_at)}</span><span className="meta-divider">{tr("·")}</span><span>{tr("Every ")}{formatInterval(model.interval_seconds)}</span></div></div>
+    <div className="detail-heading"><div className={`model-provider-mark large ${model.api_type}`}><ProviderGlyph type={model.api_type} /></div><div className="detail-heading-main"><div className="detail-breadcrumb">{model.provider_name} <ChevronRight size={13} /> {tr(formatLabels[model.request_format] ?? apiTypeLabels[model.api_type])}</div><h1>{model.name}</h1><div className="detail-heading-meta"><StatusBadge status={model.enabled ? model.current_status : 'DISABLED'} /><span>{tr("Last checked ")}{timeAgo(model.last_checked_at)}</span><span className="meta-divider">{tr("·")}</span><span>{tr("Every ")}{formatInterval(model.interval_seconds)}</span></div></div>
       <div className="detail-actions"><button className="button secondary" onClick={() => void onCheck()}><RefreshCw size={15} /> {tr("Run check")}</button></div></div>
     <div className="detail-stat-grid">
       <DetailStat label="CURRENT LATENCY" value={model.last_latency_ms == null ? '—' : formatMs(model.last_latency_ms)} hint={`TTFT ${model.stats?.['24h']?.averageTtft == null ? '—' : formatMs(model.stats['24h'].averageTtft)}`} icon={<Gauge size={15} />} />

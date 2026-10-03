@@ -2,11 +2,15 @@ import { constantTimeTextEqual, cookieValue, decryptSecret, encryptSecret, rando
 import { performCheck } from './checker';
 import { getJoinedModel, runModelCheck, testModel } from './monitor';
 import { allIncidents, dashboardStats, history, modelIncidents, modelStats } from './stats';
-import type { Env, ModelRow, ProviderRow } from './types';
+import type { Env, ModelRow, ProviderRow, RequestFormat } from './types';
 
 const DEFAULT_PROMPT = 'Reply with exactly: OK';
 const failureChoices = new Set([1, 2, 3, 5, 10]);
 const secretHeaderPattern = /authorization|api[-_]?key|token|secret|cookie|password|session|auth/i;
+const requestFormats = new Set<RequestFormat>(['openai_chat', 'openai_responses', 'anthropic_messages', 'gemini_generate']);
+const formatApiTypes: Record<RequestFormat, ProviderRow['api_type']> = {
+  openai_chat: 'openai', openai_responses: 'openai', anthropic_messages: 'anthropic', gemini_generate: 'gemini',
+};
 type JsonObject = Record<string, unknown>;
 
 function json(data: unknown, status = 200, headers: HeadersInit = {}): Response {
@@ -168,17 +172,23 @@ function normalizedModel(input: JsonObject, prior?: ModelRow) {
 }
 
 async function existingModelForProvider(env: Env, providerId: string): Promise<ModelRow | null> {
-  return env.DB.prepare('SELECT * FROM models WHERE provider_id=? ORDER BY created_at LIMIT 1').bind(providerId).first<ModelRow>();
+  return env.DB.prepare('SELECT * FROM models WHERE provider_id=? ORDER BY created_at,id LIMIT 1').bind(providerId).first<ModelRow>();
 }
 
 async function saveProvider(env: Env, input: JsonObject, providerId?: string): Promise<{ id: string }> {
+  const priorProvider = providerId ? await env.DB.prepare('SELECT * FROM providers WHERE id=?').bind(providerId).first<ProviderRow>() : null;
+  if (providerId && !priorProvider) throw new ApiError('PROVIDER_NOT_FOUND', 'Provider was not found.', 404);
   const name = asString(input.name);
-  const type = asString(input.apiType ?? input.api_type) as ProviderRow['api_type'];
+  const suppliedFormat = asString(input.requestFormat ?? input.request_format);
+  const legacyType = asString(input.apiType ?? input.api_type, priorProvider?.api_type ?? 'openai') as ProviderRow['api_type'];
+  const legacyFormat: RequestFormat = legacyType === 'anthropic' ? 'anthropic_messages' : legacyType === 'gemini' ? 'gemini_generate' : 'openai_chat';
+  const requestFormat = (suppliedFormat || priorProvider?.request_format || legacyFormat) as RequestFormat;
+  const type = suppliedFormat ? formatApiTypes[requestFormat] : legacyType;
   const baseUrl = asString(input.baseUrl ?? input.base_url);
   if (!name || name.length > 100) throw new ApiError('INVALID_PROVIDER', 'Provider name is required and must be under 100 characters.', 400);
-  if (!['openai', 'gemini', 'anthropic', 'custom'].includes(type)) throw new ApiError('INVALID_API_TYPE', 'API type must be OpenAI Compatible, Gemini, Anthropic, or Custom.', 400);
+  if (!['openai', 'gemini', 'anthropic', 'custom'].includes(type) || !requestFormats.has(requestFormat)) throw new ApiError('INVALID_API_TYPE', 'Choose a supported AI request format.', 400);
   validateUrl(baseUrl, 'API Base URL');
-  const incomingHeaders = parseObject(input.headers);
+  const incomingHeaders = input.headers === undefined && priorProvider ? parseObject(priorProvider.headers_json) : parseObject(input.headers);
   const headerSplit = sensitiveHeaders(incomingHeaders);
   const customMethod = asString(input.method ?? input.customMethod ?? input.custom_method, 'POST').toUpperCase();
   if (!['GET', 'POST', 'PUT', 'PATCH'].includes(customMethod)) throw new ApiError('INVALID_METHOD', 'Custom method must be GET, POST, PUT, or PATCH.', 400);
@@ -191,22 +201,18 @@ async function saveProvider(env: Env, input: JsonObject, providerId?: string): P
   if (Array.isArray(expectedInput)) expected = expectedInput.map(Number).filter((value) => Number.isInteger(value) && value >= 100 && value <= 599);
   else if (typeof expectedInput === 'string') expected = expectedInput.split(',').map((value) => Number(value.trim())).filter((value) => Number.isInteger(value) && value >= 100 && value <= 599);
   if (!expected.length) throw new ApiError('INVALID_EXPECTED_STATUS', 'At least one expected HTTP status is required.', 400);
-  const responsePath = asString(input.responsePath ?? input.response_path).slice(0, 300);
   const modelPrior = providerId ? await existingModelForProvider(env, providerId) : undefined;
-  const defaults = providerId ? null : await getSettings(env);
-  const model = normalizedModel(providerId ? input : {
+  const modelName = asString(input.model ?? input.modelName);
+  const shouldSaveModel = !providerId || Boolean(modelName);
+  const defaults = shouldSaveModel && !providerId ? await getSettings(env) : null;
+  const model = shouldSaveModel ? normalizedModel({
     failureThreshold: defaults?.defaultFailureThreshold ?? 3,
     recoveryThreshold: defaults?.defaultRecoveryThreshold ?? 2,
     ...input,
-  }, modelPrior ?? undefined);
+  }, providerId ? modelPrior ?? undefined : undefined) : null;
   const now = new Date().toISOString();
   const id = providerId ?? randomId();
   const modelId = modelPrior?.id ?? randomId();
-  let priorProvider: ProviderRow | null = null;
-  if (providerId) {
-    priorProvider = await env.DB.prepare('SELECT * FROM providers WHERE id=?').bind(providerId).first<ProviderRow>();
-    if (!priorProvider) throw new ApiError('PROVIDER_NOT_FOUND', 'Provider was not found.', 404);
-  }
   let priorSecrets: Record<string, string> = {};
   if (priorProvider?.secret_headers_cipher) {
     try { priorSecrets = JSON.parse((await decryptSecret(env, priorProvider.secret_headers_cipher)) ?? '{}') as Record<string, string>; } catch { priorSecrets = {}; }
@@ -218,43 +224,63 @@ async function saveProvider(env: Env, input: JsonObject, providerId?: string): P
   const apiKeyInput = asString(input.apiKey ?? input.api_key);
   const apiKey = apiKeyInput && !apiKeyInput.includes('••') ? apiKeyInput : null;
   const apiKeyCipher = apiKey ? await encryptSecret(env, JSON.stringify({ apiKey })) : priorProvider?.api_key_cipher ?? null;
-  const secretHeadersCipher = Object.keys(mergedSecrets).length ? await encryptSecret(env, JSON.stringify(mergedSecrets)) : null;
+  const secretHeadersCipher = input.headers === undefined && priorProvider ? priorProvider.secret_headers_cipher
+    : Object.keys(mergedSecrets).length ? await encryptSecret(env, JSON.stringify(mergedSecrets)) : null;
   const bodyInput = asString(input.body ?? input.customBody ?? input.custom_body).slice(0, 20000);
   const customBodyCipher = bodyInput ? await encryptSecret(env, bodyInput) : priorProvider?.custom_body_cipher ?? null;
   const provider = {
-    id, name, api_type: type, base_url: baseUrl, api_key_cipher: apiKeyCipher, secret_headers_cipher: secretHeadersCipher,
+    id, name, api_type: type, request_format: requestFormat, base_url: baseUrl, api_key_cipher: apiKeyCipher, secret_headers_cipher: secretHeadersCipher,
     headers_json: JSON.stringify(headerSplit.visible), custom_method: customMethod, custom_path: customPath,
     custom_body: '', custom_body_cipher: customBodyCipher,
-    expected_status_json: JSON.stringify(expected), response_path: responsePath,
+    expected_status_json: JSON.stringify(expected), response_path: asString(input.responsePath ?? input.response_path, priorProvider?.response_path ?? '').slice(0, 300),
   };
   const modelColumns = `name=?,enabled=?,actual_call=?,interval_seconds=?,jitter_seconds=?,timeout_ms=?,prompt=?,max_tokens=?,temperature=?,
     warning_latency_ms=?,critical_latency_ms=?,floating_enabled=?,floating_percent=?,baseline_method=?,baseline_samples=?,failure_threshold=?,recovery_threshold=?,updated_at=?`;
-  const modelValues = [model.name, model.enabled, model.actual_call, model.interval_seconds, model.jitter_seconds, model.timeout_ms, model.prompt,
+  const modelValues = model ? [model.name, model.enabled, model.actual_call, model.interval_seconds, model.jitter_seconds, model.timeout_ms, model.prompt,
     model.max_tokens, model.temperature, model.warning_latency_ms, model.critical_latency_ms, model.floating_enabled, model.floating_percent,
-    model.baseline_method, model.baseline_samples, model.failure_threshold, model.recovery_threshold, now];
+    model.baseline_method, model.baseline_samples, model.failure_threshold, model.recovery_threshold, now] : [];
   if (priorProvider) {
-    await env.DB.batch([
-      env.DB.prepare(`UPDATE providers SET name=?,api_type=?,base_url=?,api_key_cipher=?,secret_headers_cipher=?,headers_json=?,custom_method=?,
-        custom_path=?,custom_body=?,custom_body_cipher=?,expected_status_json=?,response_path=?,updated_at=? WHERE id=?`)
-        .bind(provider.name, provider.api_type, provider.base_url, provider.api_key_cipher, provider.secret_headers_cipher, provider.headers_json,
-          provider.custom_method, provider.custom_path, provider.custom_body, provider.custom_body_cipher, provider.expected_status_json, provider.response_path, now, id),
-      env.DB.prepare(`UPDATE models SET ${modelColumns} WHERE id=?`).bind(...modelValues, modelId),
-    ]);
+    const statements = [env.DB.prepare(`UPDATE providers SET name=?,api_type=?,request_format=?,base_url=?,api_key_cipher=?,secret_headers_cipher=?,headers_json=?,custom_method=?,
+      custom_path=?,custom_body=?,custom_body_cipher=?,expected_status_json=?,response_path=?,updated_at=? WHERE id=?`)
+      .bind(provider.name, provider.api_type, provider.request_format, provider.base_url, provider.api_key_cipher, provider.secret_headers_cipher, provider.headers_json,
+        provider.custom_method, provider.custom_path, provider.custom_body, provider.custom_body_cipher, provider.expected_status_json, provider.response_path, now, id)];
+    if (model && modelPrior) statements.push(env.DB.prepare(`UPDATE models SET ${modelColumns} WHERE id=?`).bind(...modelValues, modelId));
+    if (model && !modelPrior) statements.push(modelInsert(env, id, modelId, model, now));
+    await env.DB.batch(statements);
   } else {
     await env.DB.batch([
-      env.DB.prepare(`INSERT INTO providers (id,name,api_type,base_url,api_key_cipher,secret_headers_cipher,headers_json,custom_method,custom_path,
-        custom_body,custom_body_cipher,expected_status_json,response_path,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .bind(provider.id, provider.name, provider.api_type, provider.base_url, provider.api_key_cipher, provider.secret_headers_cipher, provider.headers_json,
+      env.DB.prepare(`INSERT INTO providers (id,name,api_type,request_format,base_url,api_key_cipher,secret_headers_cipher,headers_json,custom_method,custom_path,
+        custom_body,custom_body_cipher,expected_status_json,response_path,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .bind(provider.id, provider.name, provider.api_type, provider.request_format, provider.base_url, provider.api_key_cipher, provider.secret_headers_cipher, provider.headers_json,
           provider.custom_method, provider.custom_path, provider.custom_body, provider.custom_body_cipher, provider.expected_status_json, provider.response_path, now, now),
-      env.DB.prepare(`INSERT INTO models (id,provider_id,name,enabled,actual_call,interval_seconds,jitter_seconds,timeout_ms,prompt,max_tokens,temperature,
-        warning_latency_ms,critical_latency_ms,floating_enabled,floating_percent,baseline_method,baseline_samples,failure_threshold,recovery_threshold,
-        next_check_at,current_status,raw_status,consecutive_failures,consecutive_successes,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .bind(modelId, id, model.name, model.enabled, model.actual_call, model.interval_seconds, model.jitter_seconds, model.timeout_ms, model.prompt,
-          model.max_tokens, model.temperature, model.warning_latency_ms, model.critical_latency_ms, model.floating_enabled, model.floating_percent,
-          model.baseline_method, model.baseline_samples, model.failure_threshold, model.recovery_threshold, now, 'UNKNOWN', 'UNKNOWN', 0, 0, now, now),
+      modelInsert(env, id, modelId, model!, now),
     ]);
   }
+  return { id };
+}
+
+function modelInsert(env: Env, providerId: string, modelId: string, model: ReturnType<typeof normalizedModel>, now: string): D1PreparedStatement {
+  return env.DB.prepare(`INSERT INTO models (id,provider_id,name,enabled,actual_call,interval_seconds,jitter_seconds,timeout_ms,prompt,max_tokens,temperature,
+    warning_latency_ms,critical_latency_ms,floating_enabled,floating_percent,baseline_method,baseline_samples,failure_threshold,recovery_threshold,
+    next_check_at,current_status,raw_status,consecutive_failures,consecutive_successes,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(modelId, providerId, model.name, model.enabled, model.actual_call, model.interval_seconds, model.jitter_seconds, model.timeout_ms, model.prompt,
+      model.max_tokens, model.temperature, model.warning_latency_ms, model.critical_latency_ms, model.floating_enabled, model.floating_percent,
+      model.baseline_method, model.baseline_samples, model.failure_threshold, model.recovery_threshold, now, 'UNKNOWN', 'UNKNOWN', 0, 0, now, now);
+}
+
+async function addProviderModel(env: Env, providerId: string, input: JsonObject): Promise<{ id: string }> {
+  const provider = await env.DB.prepare('SELECT id FROM providers WHERE id=?').bind(providerId).first<{ id: string }>();
+  if (!provider) throw new ApiError('PROVIDER_NOT_FOUND', 'Provider was not found.', 404);
+  const name = asString(input.model ?? input.modelName ?? input.name);
+  if (!name || name.length > 200) throw new ApiError('INVALID_MODEL', 'Enter a model name under 200 characters.', 400);
+  const duplicate = await env.DB.prepare('SELECT id FROM models WHERE provider_id=? AND name=? COLLATE NOCASE').bind(providerId, name).first();
+  if (duplicate) throw new ApiError('MODEL_ALREADY_EXISTS', 'This model is already added to the provider.', 409);
+  const settings = await getSettings(env);
+  const model = normalizedModel({ failureThreshold: settings.defaultFailureThreshold, recoveryThreshold: settings.defaultRecoveryThreshold, ...input, model: name });
+  const id = randomId();
+  const now = new Date().toISOString();
+  await modelInsert(env, providerId, id, model, now).run();
   return { id };
 }
 
@@ -262,7 +288,7 @@ async function listProviders(env: Env) {
   const providers = await env.DB.prepare('SELECT * FROM providers ORDER BY name').all<ProviderRow>();
   const result = [];
   for (const provider of providers.results) {
-    const model = await existingModelForProvider(env, provider.id);
+    const models = await env.DB.prepare('SELECT * FROM models WHERE provider_id=? ORDER BY created_at,id').bind(provider.id).all<ModelRow>();
     const apiKeySet = Boolean(provider.api_key_cipher);
     let keyHint = '';
     if (provider.api_key_cipher) {
@@ -279,7 +305,8 @@ async function listProviders(env: Env) {
       } catch { /* show stored header names only when ciphertext cannot be read */ }
     }
     result.push({ ...provider, api_key_cipher: undefined, secret_headers_cipher: undefined, custom_body_cipher: undefined,
-      custom_body: '', customBodySet: Boolean(provider.custom_body_cipher), apiKeySet, keyHint, headers: headerValues, model });
+      custom_body: '', customBodySet: Boolean(provider.custom_body_cipher), apiKeySet, keyHint, headers: headerValues,
+      models: models.results.map((model) => ({ ...model, provider_name: provider.name, api_type: provider.api_type, request_format: provider.request_format })) });
   }
   return result;
 }
@@ -389,9 +416,12 @@ async function checkProviderNow(env: Env, input: JsonObject) {
   const priorModel = existingProviderId ? await existingModelForProvider(env, existingProviderId) : null;
   const prior = priorModel ? await getJoinedModel(env, priorModel.id) : null;
   if (input.providerId && !prior) throw new ApiError('PROVIDER_NOT_FOUND', 'Provider was not found.', 404);
-  const type = asString(input.apiType ?? input.api_type, prior?.api_type ?? '') as ProviderRow['api_type'];
+  const suppliedFormat = asString(input.requestFormat ?? input.request_format);
+  const legacyType = asString(input.apiType ?? input.api_type, prior?.api_type ?? '') as ProviderRow['api_type'];
+  const format = (suppliedFormat || prior?.request_format || (legacyType === 'anthropic' ? 'anthropic_messages' : legacyType === 'gemini' ? 'gemini_generate' : 'openai_chat')) as RequestFormat;
+  const type = suppliedFormat ? formatApiTypes[format] : legacyType;
   const baseUrl = asString(input.baseUrl ?? input.base_url, prior?.base_url ?? '');
-  if (!['openai', 'gemini', 'anthropic', 'custom'].includes(type)) throw new ApiError('INVALID_API_TYPE', 'Choose a supported API type.', 400);
+  if (!['openai', 'gemini', 'anthropic', 'custom'].includes(type) || !requestFormats.has(format)) throw new ApiError('INVALID_API_TYPE', 'Choose a supported AI request format.', 400);
   validateUrl(baseUrl, 'API Base URL');
   const split = sensitiveHeaders(parseObject(input.headers));
   const oldSecretHeaders = prior?.secret_headers_cipher ? JSON.parse((await decryptSecret(env, prior.secret_headers_cipher)) ?? '{}') as Record<string, string> : {};
@@ -400,7 +430,7 @@ async function checkProviderNow(env: Env, input: JsonObject) {
   const apiKeyCipher = apiKey && !apiKey.includes('••') ? await encryptSecret(env, JSON.stringify({ apiKey })) : prior?.api_key_cipher ?? null;
   const bodyInput = asString(input.body);
   const provider: ProviderRow = {
-    id: prior?.provider_id ?? randomId(), name, api_type: type, base_url: baseUrl,
+    id: prior?.provider_id ?? randomId(), name, api_type: type, request_format: format, base_url: baseUrl,
     api_key_cipher: apiKeyCipher,
     secret_headers_cipher: Object.keys(secretHeaders).length ? await encryptSecret(env, JSON.stringify(secretHeaders)) : null,
     headers_json: JSON.stringify(split.visible), custom_method: asString(input.method, prior?.custom_method ?? 'POST'), custom_path: asString(input.path, prior?.custom_path ?? ''),
@@ -475,6 +505,8 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
     if (path === '/api/providers' && request.method === 'GET') return success(await listProviders(env));
     if (path === '/api/providers' && request.method === 'POST') return success(await saveProvider(env, await bodyJson(request)), 201);
     if (path === '/api/providers/test' && request.method === 'POST') return success(await checkProviderNow(env, await bodyJson(request)));
+    const providerModelsMatch = path.match(/^\/api\/providers\/([^/]+)\/models$/);
+    if (providerModelsMatch && request.method === 'POST') return success(await addProviderModel(env, providerModelsMatch[1], await bodyJson(request)), 201);
     const providerMatch = path.match(/^\/api\/providers\/([^/]+)$/);
     if (providerMatch && request.method === 'PUT') return success(await saveProvider(env, await bodyJson(request), providerMatch[1]));
     if (providerMatch && request.method === 'DELETE') {

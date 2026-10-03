@@ -10,7 +10,7 @@ const apiKey = 'sk-smoke-primary-never-persist-91F3';
 const echoedKey = 'sk-smoke-error-never-return-48C2';
 const headerKey = 'header-smoke-secret-never-store-17DD';
 const passwordHeaderKey = 'password-header-smoke-secret-never-store-25DA';
-const customBodyMarker = 'custom-body-smoke-never-store-81AA';
+const addedModelName = 'smoke-added-model';
 const mockPort = 9911;
 let cookie = '';
 let csrf = '';
@@ -105,23 +105,23 @@ try {
   assert.equal(defaultPublicStatus.response.status, 200, 'the public status page should be enabled by default');
   assert.equal(defaultPublicStatus.result.success, true);
   const create = await request('/api/providers', { method: 'POST', body: {
-    name: 'Local smoke provider', apiType: 'openai', baseUrl: `http://127.0.0.1:${mockPort}/v1`, apiKey,
+    name: 'Local smoke provider', requestFormat: 'openai_chat', baseUrl: `http://127.0.0.1:${mockPort}/v1`, apiKey,
     model: 'smoke-model', intervalSeconds: 300, timeoutMs: 5000, prompt: 'Reply with exactly: OK',
     maxTokens: 5, failureThreshold: 3, recoveryThreshold: 2, headers: { 'X-API-Key': headerKey, 'X-Password': passwordHeaderKey },
-    body: `{"marker":"${customBodyMarker}"}`,
   } });
   assert.equal(create.response.status, 201, create.result.error?.message ?? 'provider create failed');
   primaryId = create.result.data.id;
 
   let providers = data((await request('/api/providers')).result);
   const first = providers.find((item) => item.id === primaryId);
-  assert.ok(first?.model?.id, 'creating a provider should create its first model');
+  assert.ok(first?.models?.length, 'creating a provider should create its first model');
+  assert.equal(first.request_format, 'openai_chat');
   assert.equal(first.apiKeySet, true);
   assert.ok(!JSON.stringify(first).includes(apiKey), 'provider API response must not expose the API Key');
   assert.ok(!JSON.stringify(first).includes(headerKey), 'provider API response must not expose sensitive header values');
   assert.ok(!JSON.stringify(first).includes(passwordHeaderKey), 'password headers must also be masked');
-  assert.equal(first.customBodySet, true);
-  const providerModelId = first.model.id;
+
+  const providerModelId = first.models[0].id;
 
   const wrangler = fileURLToPath(new URL('../node_modules/wrangler/bin/wrangler.js', import.meta.url));
   const sql = spawnSync(process.execPath, [wrangler, 'd1', 'execute', 'model-monitor', '--local', '--command',
@@ -132,15 +132,14 @@ try {
   assert.ok(secretColumns.api_key_cipher.startsWith('v1.') && !secretColumns.api_key_cipher.includes(apiKey), 'API Key should be AES-GCM ciphertext in D1');
   assert.ok(secretColumns.secret_headers_cipher.startsWith('v1.') && !secretColumns.secret_headers_cipher.includes(headerKey), 'sensitive headers should be encrypted in D1');
   assert.ok(!secretColumns.secret_headers_cipher.includes(passwordHeaderKey), 'password header should be encrypted in D1');
-  assert.ok(secretColumns.custom_body_cipher.startsWith('v1.') && !secretColumns.custom_body_cipher.includes(customBodyMarker), 'custom request bodies should be encrypted in D1');
 
   const scheduler = await fetch(new URL('/cdn-cgi/local/scheduled', appOrigin));
   assert.equal(scheduler.status, 200, 'the configured local Cron scheduler should run');
 
   const test = data((await request('/api/providers/test', { method: 'POST', body: {
-    providerId: primaryId, name: first.name, apiType: first.api_type, baseUrl: first.base_url, apiKey: '', model: first.model.name,
-    intervalSeconds: first.model.interval_seconds, timeoutMs: first.model.timeout_ms, prompt: first.model.prompt,
-    maxTokens: first.model.max_tokens, failureThreshold: first.model.failure_threshold, recoveryThreshold: first.model.recovery_threshold,
+    providerId: primaryId, name: first.name, requestFormat: first.request_format, baseUrl: first.base_url, apiKey: '', model: first.models[0].name,
+    intervalSeconds: first.models[0].interval_seconds, timeoutMs: first.models[0].timeout_ms, prompt: first.models[0].prompt,
+    maxTokens: first.models[0].max_tokens, failureThreshold: first.models[0].failure_threshold, recoveryThreshold: first.models[0].recovery_threshold,
     headers: first.headers,
   } })).result);
   assert.equal(test.available, true, test.error ?? 'OpenAI-compatible streaming probe should succeed');
@@ -148,22 +147,16 @@ try {
   assert.equal(test.responsePreview, 'OK');
   assert.ok(test.ttft > 0, 'streaming probe should capture TTFT');
 
-  const customGet = data((await request('/api/providers/test', { method: 'POST', body: {
-    name: 'GET custom smoke', apiType: 'custom', baseUrl: `http://127.0.0.1:${mockPort}`, method: 'GET', path: '/health',
-    expectedStatus: [200], responsePath: 'health', model: 'smoke-get-model', timeoutMs: 5000, maxTokens: 5,
-  } })).result);
-  assert.equal(customGet.success, true, customGet.error ?? 'Custom GET health request should parse its response');
-  assert.equal(customGet.response, 'OK');
-
+  const addedModel = await request(`/api/providers/${primaryId}/models`, { method: 'POST', body: { model: addedModelName } });
+  assert.equal(addedModel.response.status, 201, addedModel.result.error?.message ?? 'add model failed');
+  const duplicateModel = await request(`/api/providers/${primaryId}/models`, { method: 'POST', body: { model: addedModelName } });
+  assert.equal(duplicateModel.response.status, 409, 'duplicate model names should be rejected');
   const edited = await request(`/api/providers/${primaryId}`, { method: 'PUT', body: {
-    name: 'Updated local smoke provider', apiType: first.api_type, baseUrl: first.base_url, apiKey: '', model: first.model.name,
-    intervalSeconds: first.model.interval_seconds, timeoutMs: first.model.timeout_ms, prompt: first.model.prompt,
-    maxTokens: first.model.max_tokens, failureThreshold: first.model.failure_threshold, recoveryThreshold: first.model.recovery_threshold,
-    headers: first.headers, body: '',
+    name: 'Updated local smoke provider', requestFormat: first.request_format, baseUrl: first.base_url, apiKey: '', headers: first.headers,
   } });
   assert.equal(edited.response.status, 200, edited.result.error?.message ?? 'provider update failed');
   providers = data((await request('/api/providers')).result);
-  assert.equal(providers.find((item) => item.id === primaryId).customBodySet, true, 'an empty replacement should retain the encrypted custom body');
+  assert.equal(providers.find((item) => item.id === primaryId).models.length, 2, 'provider should retain multiple models');
 
   const check = data((await request(`/api/models/${providerModelId}/check`, { method: 'POST', body: {} })).result);
   assert.equal(check.available, true);
@@ -179,12 +172,12 @@ try {
   assert.equal(data((await request(`/api/models/${providerModelId}/incidents`)).result).length, 0);
 
   const failing = await request('/api/providers', { method: 'POST', body: {
-    name: 'Local auth error smoke', apiType: 'openai', baseUrl: `http://127.0.0.1:${mockPort}/v1`, apiKey: echoedKey,
+    name: 'Local auth error smoke', requestFormat: 'openai_chat', baseUrl: `http://127.0.0.1:${mockPort}/v1`, apiKey: echoedKey,
     model: 'smoke-auth-error', intervalSeconds: 300, timeoutMs: 5000, failureThreshold: 1, recoveryThreshold: 1,
   } });
   assert.equal(failing.response.status, 201, failing.result.error?.message ?? 'second provider create failed');
   failingId = failing.result.data.id;
-  const failingModel = data((await request('/api/providers')).result).find((item) => item.id === failingId).model;
+  const failingModel = data((await request('/api/providers')).result).find((item) => item.id === failingId).models[0];
   const failedCheck = data((await request(`/api/models/${failingModel.id}/check`, { method: 'POST', body: {} })).result);
   assert.equal(failedCheck.statusCode, 401);
   assert.equal(failedCheck.errorType, 'AUTH_ERROR');
@@ -219,7 +212,7 @@ try {
   assert.equal(publicPage.response.status, 200, publicPage.result.error?.message ?? 'public status page should be available');
   assert.equal(publicPage.result.success, true);
   assert.ok(!JSON.stringify(publicPage.result).includes(apiKey));
-  const publicModel = publicPage.result.data.models.find((item) => item.model === 'smoke-model');
+  const publicModel = publicPage.result.data.models.find((item) => item.model === addedModelName);
   assert.ok(publicModel, 'the anonymous status API should include public model availability');
   assert.deepEqual(Object.keys(publicModel).sort(), ['checkedAt', 'enabled', 'latency', 'model', 'provider', 'status'].sort(), 'public model data should contain only allow-listed fields');
   const notificationCreate = await request('/api/notifications', { method: 'POST', body: { name: 'Smoke notification', kind: 'webhook', url: 'https://alerts.invalid/private-smoke-token', events: ['DOWN'], cooldownMinutes: 15 } });
@@ -230,7 +223,7 @@ try {
   assert.ok(!JSON.stringify(notificationList).includes('private-smoke-token'), 'notification targets must not be returned');
   const notificationEdit = await request(`/api/notifications/${notificationId}`, { method: 'PUT', body: { name: 'Updated smoke notification', kind: 'webhook', events: ['DOWN', 'RECOVERED'], cooldownMinutes: 20 } });
   assert.equal(notificationEdit.response.status, 200, notificationEdit.result.error?.message ?? 'notification update failed');
-  assert.equal(data((await request('/api/dashboard')).result).summary.totalModels, 2);
+  assert.equal(data((await request('/api/dashboard')).result).summary.totalModels, 3);
 
   await request(`/api/notifications/${notificationId}`, { method: 'DELETE' });
   await request(`/api/providers/${primaryId}`, { method: 'DELETE' });
@@ -240,7 +233,7 @@ try {
   await request('/api/auth/logout', { method: 'POST', body: {} });
   cookie = '';
 
-  console.log('Smoke verification passed: auth/CSRF, provider CRUD, AES-GCM secret storage, custom GET parsing, streaming TTFT, check history, incident classification, batch actions, public status and notification redaction.');
+  console.log('Smoke verification passed: auth/CSRF, multi-model provider CRUD, request formats, AES-GCM secret storage, streaming TTFT, check history, incident classification, batch actions, public status and notification redaction.');
 } finally {
   if (cookie && csrf) {
     for (const id of [notificationId].filter(Boolean)) await request(`/api/notifications/${id}`, { method: 'DELETE' }).catch(() => undefined);

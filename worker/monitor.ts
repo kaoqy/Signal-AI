@@ -7,7 +7,7 @@ const outageStates = new Set<MonitorStatus>(['DOWN', 'TIMEOUT', 'ERROR', 'SLOW']
 
 export async function getJoinedModel(env: Env, modelId: string): Promise<Joined | null> {
   return env.DB.prepare(`SELECT m.*, p.name AS provider_name, p.api_type, p.base_url, p.api_key_cipher,
-    p.secret_headers_cipher, p.headers_json, p.custom_method, p.custom_path, p.custom_body, p.custom_body_cipher,
+    p.secret_headers_cipher, p.headers_json, p.request_format, p.custom_method, p.custom_path, p.custom_body, p.custom_body_cipher,
     p.expected_status_json, p.response_path FROM models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`)
     .bind(modelId).first<Joined>();
 }

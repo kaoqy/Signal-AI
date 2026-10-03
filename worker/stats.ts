@@ -122,10 +122,10 @@ export async function modelStats(env: Env, modelId: string) {
 }
 
 export async function dashboardStats(env: Env) {
-  const models = await env.DB.prepare(`SELECT m.id, m.provider_id, p.name AS provider_name, p.api_type, m.name, m.enabled,
+  const models = await env.DB.prepare(`SELECT m.id, m.provider_id, p.name AS provider_name, p.api_type, p.request_format, m.name, m.enabled,
     m.current_status, m.raw_status, m.last_checked_at, m.last_latency_ms, m.consecutive_failures, m.consecutive_successes,
     m.warning_latency_ms, m.critical_latency_ms FROM models m JOIN providers p ON p.id=m.provider_id ORDER BY p.name, m.name`).all<{
-      id: string; provider_id: string; provider_name: string; api_type: string; name: string; enabled: number;
+      id: string; provider_id: string; provider_name: string; api_type: string; request_format: string; name: string; enabled: number;
       current_status: MonitorStatus; raw_status: MonitorStatus; last_checked_at: string | null; last_latency_ms: number | null;
       consecutive_failures: number; consecutive_successes: number; warning_latency_ms: number; critical_latency_ms: number;
     }>();

@@ -1,4 +1,5 @@
 export type ApiType = 'openai' | 'gemini' | 'anthropic' | 'custom';
+export type RequestFormat = 'openai_chat' | 'openai_responses' | 'anthropic_messages' | 'gemini_generate';
 export type MonitorStatus = 'UP' | 'SLOW' | 'DOWN' | 'TIMEOUT' | 'ERROR' | 'DISABLED' | 'UNKNOWN' | 'UNKNOWN_RESPONSE' | 'DEGRADED' | 'RECOVERING';
 export type ErrorType = 'AUTH_ERROR' | 'RATE_LIMIT' | 'TIMEOUT' | 'NETWORK_ERROR' | 'SERVER_ERROR' | 'MODEL_NOT_FOUND' | 'INVALID_REQUEST' | 'PROVIDER_ERROR' | 'UNKNOWN_ERROR';
 
@@ -20,6 +21,7 @@ export interface ProviderRow {
   id: string;
   name: string;
   api_type: ApiType;
+  request_format: RequestFormat;
   base_url: string;
   api_key_cipher: string | null;
   secret_headers_cipher: string | null;
@@ -61,6 +63,7 @@ export interface ModelRow {
   last_latency_ms: number | null;
   provider_name?: string;
   api_type?: ApiType;
+  request_format?: RequestFormat;
   base_url?: string;
   api_key_cipher?: string | null;
   secret_headers_cipher?: string | null;
