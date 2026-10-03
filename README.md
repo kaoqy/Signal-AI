@@ -4,7 +4,7 @@ Signal AI 是一套部署在 Cloudflare 上的 AI API 可用性监控平台。�
 
 ## 部署前先看：需要创建什么？
 
-生产部署只需要在 Cloudflare 创建 **1 个 D1 数据库**和 **1 个 KV 命名空间**，再设置 **4 个 Worker Secrets**。项目已在 `wrangler.toml` 配置每分钟 Cron；执行 `npm run deploy` 时会一起部署 Worker、前端静态资源和 Cron，不需要另外创建服务器或单独设置 Cron。
+生产部署需要 **1 个 D1 数据库**、**1 个 KV 命名空间**和 **4 个 Worker Secrets**。本仓库的 `wrangler.toml` 已绑定 Signal AI 当前使用的 D1/KV 资源；部署到同一个 Cloudflare 账号时不要重复创建。若部署到其他账号或全新项目，再创建资源并替换绑定 ID。项目已配置每分钟 Cron；执行 `npm run deploy` 时会一起部署 Worker、前端静态资源和 Cron，不需要另外创建服务器或单独设置 Cron。
 
 本地开发不需要创建 Cloudflare D1/KV：Wrangler 会使用本地模拟资源。每个 Provider 的模型 API Key 在登录后的网页中填写，并使用 `ENCRYPTION_KEY` 加密保存到 D1；不需要为每个 Provider 单独创建 Cloudflare Secret。
 
@@ -87,14 +87,18 @@ npm install
 npx wrangler login
 ```
 
-### 2. 创建 D1 和 KV
+### 2. 核对 D1 和 KV 绑定
+
+本仓库已配置当前 Signal AI 项目的 D1 和 KV ID。部署到同一个 Cloudflare 账号时，核对 `wrangler.toml` 中 `database_id` 和 KV `id` 与 Dashboard 中该 Worker 的绑定一致即可，不要重复创建数据库或命名空间。
+
+只有部署到另一个 Cloudflare 账号或全新项目时，才运行以下命令创建资源：
 
 ```sh
 npx wrangler d1 create model-monitor
 npx wrangler kv namespace create model-monitor-cache
 ```
 
-这两个命令会分别返回 D1 `database_id` 和 KV 命名空间 `id`。打开 `wrangler.toml`，替换以下占位 ID，并保留绑定名称 `DB` 和 `CACHE`：
+命令会分别返回 D1 `database_id` 和 KV 命名空间 `id`。打开 `wrangler.toml`，将新 ID 填入对应位置，并保留绑定名称 `DB` 和 `CACHE`：
 
 - 将 `[[d1_databases]]` 下的 `database_id` 替换为 D1 命令返回的 ID；数据库名保持 `model-monitor`。
 - 将 `[[kv_namespaces]]` 下的 `id` 替换为 KV 命令返回的 ID。
@@ -119,6 +123,8 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'
 ```
 
 请妥善备份 `ENCRYPTION_KEY`。更换该值而不先迁移 D1 中已加密的数据，会导致已保存的 Provider Key、敏感 Header 和通知凭据无法解密。Provider API Key 在网页中添加后会加密保存在 D1，不需要逐个创建 Cloudflare Secret。
+
+如果使用 Cloudflare Workers Builds 从 GitHub 自动部署，请在 Cloudflare Dashboard 的 Worker **Settings → Variables and Secrets** 中把上述四项添加为 **Secrets**。如果这些值当前误放在普通 **Variables** 列表中，先删除普通变量，再用新值创建同名 Secrets。不要把密钥写进 `wrangler.toml` 的 `[vars]`；普通变量可能会出现在构建日志中。
 
 ### 4. 应用 D1 数据库迁移
 
@@ -237,7 +243,8 @@ Cloudflare Workers 不提供原生 TCP SMTP Socket。因此，邮件通知通过
 - **运行 `npm run dev` 时找不到 npm**：安装 Node.js 20.19+ 或 22.12+，并确认 npm 已加入 PATH。
 - **登录提示尚未配置认证**：检查本地 `.dev.vars` 或生产 Worker Secrets 是否包含用户名、密码和至少 24 个字符的 Session Secret。
 - **Provider 凭据无法解密**：确认当前 `ENCRYPTION_KEY` 与保存凭据时使用的值相同。不要在没有数据迁移方案时更换密钥。
-- **部署时出现 D1/KV 绑定错误**：检查 `wrangler.toml` 中的占位 ID 是否已替换，再重新应用 D1 迁移并部署。
+- **部署时出现 D1/KV 绑定错误**：检查 `wrangler.toml` 中的 D1/KV ID 是否对应当前 Cloudflare 账号，再重新应用 D1 迁移并部署。
+- **提示 `KV namespace ... not found`**：KV ID 不存在于当前 Cloudflare 账号，或绑定 ID 填错。核对 `CACHE` 绑定的 ID 与 Dashboard 中该 Worker 使用的 KV 命名空间。
 - **没有自动检测记录**：确认 Worker Cron 已部署、模型已启用、`next_check_at` 已到期，并检查 Worker 日志中的 Provider 超时或限流错误。
 - **模型状态为 `UNKNOWN_RESPONSE`**：HTTP 请求成功，但未找到可识别的文本路径。请设置 Custom 响应路径，或调整 API 类型、Body 和响应格式。
 - **出现 429 错误**：增加检测间隔、减少启用的模型数量，或遵守 Provider 的限流规则。

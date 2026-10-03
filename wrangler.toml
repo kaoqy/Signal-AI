@@ -1,7 +1,9 @@
-name = "ai-model-availability-monitor"
+name = "signal-ai"
 main = "worker/index.ts"
-compatibility_date = "2026-09-01"
+compatibility_date = "2026-10-03"
 compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+preview_urls = false
 
 [assets]
 directory = "./dist"
@@ -11,12 +13,12 @@ not_found_handling = "single-page-application"
 [[d1_databases]]
 binding = "DB"
 database_name = "model-monitor"
-database_id = "00000000-0000-0000-0000-000000000001"
+database_id = "0b7c5985-ab50-4e2d-a3af-b5df3655c44d"
 migrations_dir = "migrations"
 
 [[kv_namespaces]]
 binding = "CACHE"
-id = "00000000000000000000000000000001"
+id = "f31b858d2ab8426d8d0d2ecbcce6be45"
 
 [triggers]
 crons = ["* * * * *"]
