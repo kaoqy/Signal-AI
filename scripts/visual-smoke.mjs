@@ -84,7 +84,8 @@ class DevTools {
 async function devtoolsPage() {
   const version = await fetch('http://127.0.0.1:9225/json/version').then((response) => response.json());
   const pages = await fetch('http://127.0.0.1:9225/json/list').then((response) => response.json());
-  const target = pages.find((page) => page.type === 'page' && page.webSocketDebuggerUrl);
+  const target = pages.find((page) => page.type === 'page' && page.webSocketDebuggerUrl && page.url.startsWith(browserOrigin))
+    ?? pages.find((page) => page.type === 'page' && page.webSocketDebuggerUrl);
   assert.ok(target, 'Edge did not create a debuggable page');
   websocket = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => { websocket.addEventListener('open', resolve, { once: true }); websocket.addEventListener('error', reject, { once: true }); });
@@ -92,16 +93,17 @@ async function devtoolsPage() {
   return { client, browserVersion: version.Browser };
 }
 
-async function navigate(client, route, theme, width, height) {
+async function navigate(client, route, theme, width, height, language = 'en-US') {
   await client.command('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width < 600 });
   await client.evaluate(`localStorage.setItem('monitor-theme', ${JSON.stringify(theme)})`);
+  await client.evaluate(`localStorage.setItem('monitor-language', ${JSON.stringify(language)})`);
   const target = new URL(route, appUrl);
   target.searchParams.set('__visual', `${theme}-${Date.now()}`);
   const loaded = client.once('Page.loadEventFired');
   await client.command('Page.navigate', { url: target.href });
   await loaded;
   await wait(900);
-  if (route.startsWith('/models/')) {
+  if (route.startsWith('/admin/models/')) {
     const deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
       if (await client.evaluate(`document.querySelectorAll('.history-entry').length > 0`)) break;
@@ -153,13 +155,29 @@ try {
   await client.command('Page.enable');
   await client.command('Runtime.enable');
   await client.command('Network.enable');
-  await client.command('Network.setCookie', { name: 'monitor_session', value: cookie.split('=')[1], url: appUrl, path: '/', httpOnly: true, sameSite: 'Strict', secure: false });
+  const anonymousLoad = client.once('Page.loadEventFired');
+  await client.command('Page.navigate', { url: new URL('/', appUrl).href });
+  await anonymousLoad;
+  await wait(1200);
   const observations = [];
-  const mobileRoutes = (process.env.VISUAL_ROUTES ?? '/,/models,/incidents,/providers,/settings,/status').split(',');
+  await wait(900);
+  const anonymousHome = await client.evaluate(`({ url: location.href, readyState: document.readyState, loggedOut: !document.querySelector('.login-layout'), hasModelAvailability: document.body.innerText.includes('模型可用性'), bodyText: document.body.innerText.slice(0, 400), html: document.documentElement.outerHTML.slice(0, 1800) })`);
+  assert.equal(anonymousHome.loggedOut, true, `the public homepage should not require a login: ${JSON.stringify(anonymousHome)}`);
+  assert.equal(anonymousHome.hasModelAvailability, true, `the Chinese homepage should show model availability: ${JSON.stringify(anonymousHome)}`);
+  await client.command('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  const chineseHomeMetrics = await client.evaluate(`({ route: location.pathname, theme: document.documentElement.dataset.theme, viewport: innerWidth, contentWidth: document.documentElement.clientWidth, documentWidth: document.documentElement.scrollWidth, bodyWidth: document.body.scrollWidth, pageTitle: document.querySelector('h1')?.textContent?.trim() || '' })`);
+  const chineseHomeShot = await client.command('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, fromSurface: true });
+  const chineseHomePath = path.join(screenshots, 'public-home-390-zh-CN-dark.png');
+  await writeFile(chineseHomePath, Buffer.from(chineseHomeShot.data, 'base64'));
+  observations.push({ ...chineseHomeMetrics, screenshot: chineseHomePath });
+  await client.command('Network.setCookie', { name: 'monitor_session', value: cookie.split('=')[1], url: appUrl, path: '/', httpOnly: true, sameSite: 'Strict', secure: false });
+  observations.push(await navigate(client, '/admin', 'dark', 390, 844, 'zh-CN'));
+  assert.ok(await client.evaluate(`document.querySelector('h1')?.textContent?.includes('系统概览')`), 'the Chinese management overview should be localized');
+  const mobileRoutes = (process.env.VISUAL_ROUTES ?? '/,/admin,/admin/models,/admin/incidents,/admin/providers,/admin/settings,/status').split(',');
   for (const route of mobileRoutes) {
     for (const theme of ['dark', 'light']) observations.push(await navigate(client, route, theme, 390, 844));
   }
-  await navigate(client, '/providers', 'dark', 390, 844);
+  await navigate(client, '/admin/providers', 'dark', 390, 844);
   await client.evaluate(`Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.includes('Add provider'))?.click()`);
   const editorDeadline = Date.now() + 5000;
   while (Date.now() < editorDeadline && !await client.evaluate(`Boolean(document.querySelector('.provider-editor'))`)) await wait(100);
@@ -176,7 +194,7 @@ try {
   await writeFile(editorPath, Buffer.from(editorShot.data, 'base64'));
   observations.push({ ...editorMetrics, screenshot: editorPath });
   await client.evaluate(`document.querySelector('.provider-editor [aria-label="Close"]')?.click()`);
-  const detailView = await navigate(client, `/models/${mockModelId}`, 'dark', 390, 844);
+  const detailView = await navigate(client, `/admin/models/${mockModelId}`, 'dark', 390, 844);
   const detailEntries = await client.evaluate(`document.querySelectorAll('.history-entry').length`);
   assert.ok(detailEntries > 0, 'model details should show the failed check');
   await client.evaluate(`document.querySelector('.history-entry')?.setAttribute('open', 'true')`);
@@ -191,10 +209,10 @@ try {
   const detailPath = path.join(screenshots, 'model-error-details-390-dark.png');
   await writeFile(detailPath, Buffer.from(detailShot.data, 'base64'));
   observations.push({ ...detailView, detailFields: ['AUTH_ERROR', 'Response headers', 'Response body'], screenshot: detailPath });
-  for (const route of ['/models', '/providers', '/settings', '/status', `/models/${mockModelId}`]) {
+  for (const route of ['/admin/models', '/admin/providers', '/admin/settings', '/status', `/admin/models/${mockModelId}`]) {
     observations.push(await navigate(client, route, 'dark', 320, 800));
   }
-  for (const route of ['/', '/settings']) observations.push(await navigate(client, route, 'dark', 1440, 960));
+  for (const route of ['/', '/admin/settings']) observations.push(await navigate(client, route, 'dark', 1440, 960));
   console.log(JSON.stringify({ browserVersion, testedViews: observations.length, viewportWidths: [...new Set(observations.map((item) => item.viewport))], routes: [...new Set(observations.map((item) => item.route))], noHorizontalOverflow: observations.every((item) => item.documentWidth <= item.contentWidth && item.bodyWidth <= item.contentWidth), errorDetailsRedacted: true }, null, 2));
 } finally {
   if (csrf && cookie) {

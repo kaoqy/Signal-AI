@@ -1,6 +1,6 @@
 # Signal AI — AI 模型可用性监控平台
 
-Signal AI 是一套部署在 Cloudflare 上的 AI API 可用性监控平台。它会按模型自己的周期发送小型真实模型请求，记录状态、HTTP 响应、耗时、TTFT、错误详情和 Incident，并提供一个 React 管理面板与可选公开状态页。
+Signal AI 是一套部署在 Cloudflare 上的 AI API 可用性监控平台。它会按模型自己的周期发送小型真实模型请求，记录状态、HTTP 响应、耗时、TTFT、错误详情和 Incident，并提供中英双语的 React 管理面板与免登录公开状态首页。
 
 ## 部署前先看：需要创建什么？
 
@@ -28,7 +28,8 @@ Signal AI 是一套部署在 Cloudflare 上的 AI API 可用性监控平台。�
 - Webhook、Discord Webhook、Telegram Bot、邮件服务 Webhook 通知；事件订阅与 5–1440 分钟冷却。
 - HttpOnly/Secure/SameSite 会话 Cookie、签名会话、CSRF token、登录 IP 限流；管理 API 不允许匿名访问。
 - Provider Key、自定义敏感 Header、通知目标凭据使用 `ENCRYPTION_KEY` 经 AES-GCM 加密后写入 D1。API 只返回遮罩值。
-- 响应式面板、Dark/Light 模式、模型搜索和过滤、批量启停/删除/强制检测，以及 `/status` 公开页。
+- 中文和英文界面切换、响应式面板、Dark/Light 模式、模型搜索和过滤、批量启停/删除/强制检测。
+- `/` 和 `/status` 提供免登录、每分钟自动刷新的公开状态页；`/admin` 进入需要管理员登录的管理后台。
 
 ## 架构
 
@@ -44,7 +45,7 @@ Cloudflare Worker ── Fetch API ── AI Provider APIs
       └── Workers Assets: Vite production build
 ```
 
-`worker/` 目录包含 Worker、认证、加密凭据处理、Provider 适配器、数据持久化和调度器；`src/` 目录包含管理面板和公开状态页；`migrations/0001_init.sql` 定义 D1 数据表、外键和查询索引。
+`worker/` 目录包含 Worker、认证、加密凭据处理、Provider 适配器、数据持久化和调度器；`src/` 目录包含中英双语管理面板和公开状态页；D1 数据表、外键和查询索引由 `migrations/` 中的迁移文件定义。
 
 ## 环境要求
 
@@ -134,6 +135,8 @@ npx wrangler d1 migrations apply model-monitor --remote
 
 这会按 `migrations/` 中的 SQL 文件创建表、外键和索引。以后更新数据库结构时新增迁移文件，并使用 `npm run db:migrate:remote` 应用。
 
+`0002_public_status_default.sql` 会将旧部署中已保存的公开状态页选项切换为开启。更新部署时请先应用迁移，再发布 Worker。
+
 ### 5. 部署 Worker、前端和 Cron
 
 ```sh
@@ -218,9 +221,11 @@ D1 迁移采用增量方式，不要修改已经在生产环境执行过的迁�
 | GET / PUT | `/api/settings` | Read or update retention, public status, and new-model threshold defaults |
 | GET / POST | `/api/notifications` | List or add notification destinations |
 | PUT / DELETE | `/api/notifications/:id` | Update or remove a destination |
-| GET | `/api/status` | Public provider status when enabled; otherwise 404 unless authenticated |
+| GET | `/api/status` | 默认免登录返回公开状态；可在后台设置中改为私有 |
 
-界面会调用 `/api/dashboard`、`/api/settings`、`/api/notifications` 和上表中的 REST 接口。任何响应都不会包含完整 API Key。自定义错误 Body 会截断，并在存储或返回前脱敏其中的敏感值。
+网页 `/` 是无需登录的模型可用性首页，`/status` 是兼容路径；管理后台位于 `/admin`，必须使用管理员账号登录。页面右上角可以切换中文或英文，语言偏好只保存在当前浏览器中。
+
+界面会调用 `/api/dashboard`、`/api/settings`、`/api/notifications` 和上表中的 REST 接口。任何响应都不会包含完整 API Key。公开状态接口只返回服务商名称、模型名称、状态、延迟、检测时间和汇总统计，不包含 Provider 凭据。自定义错误 Body 会截断，并在存储或返回前脱敏其中的敏感值。
 
 ## 通知配置
 

@@ -101,8 +101,9 @@ try {
 
   const prior = data((await request('/api/settings')).result);
   originalSettings = { ...prior };
-  const privateStatus = await request('/api/status', { authorized: false, token: false, origin: null });
-  assert.equal(privateStatus.response.status, 404, 'public status should be private by default');
+  const defaultPublicStatus = await request('/api/status', { authorized: false, token: false, origin: null });
+  assert.equal(defaultPublicStatus.response.status, 200, 'the public status page should be enabled by default');
+  assert.equal(defaultPublicStatus.result.success, true);
   const create = await request('/api/providers', { method: 'POST', body: {
     name: 'Local smoke provider', apiType: 'openai', baseUrl: `http://127.0.0.1:${mockPort}/v1`, apiKey,
     model: 'smoke-model', intervalSeconds: 300, timeoutMs: 5000, prompt: 'Reply with exactly: OK',
@@ -218,6 +219,9 @@ try {
   assert.equal(publicPage.response.status, 200, publicPage.result.error?.message ?? 'public status page should be available');
   assert.equal(publicPage.result.success, true);
   assert.ok(!JSON.stringify(publicPage.result).includes(apiKey));
+  const publicModel = publicPage.result.data.models.find((item) => item.model === 'smoke-model');
+  assert.ok(publicModel, 'the anonymous status API should include public model availability');
+  assert.deepEqual(Object.keys(publicModel).sort(), ['checkedAt', 'enabled', 'latency', 'model', 'provider', 'status'].sort(), 'public model data should contain only allow-listed fields');
   const notificationCreate = await request('/api/notifications', { method: 'POST', body: { name: 'Smoke notification', kind: 'webhook', url: 'https://alerts.invalid/private-smoke-token', events: ['DOWN'], cooldownMinutes: 15 } });
   assert.equal(notificationCreate.response.status, 201);
   const notificationList = data((await request('/api/notifications')).result);

@@ -285,7 +285,7 @@ async function listProviders(env: Env) {
 }
 
 function defaultSettings(env: Env) {
-  return { retentionDays: Number(env.DEFAULT_RETENTION_DAYS) || 14, aggregateRetentionDays: 180, publicStatus: false, defaultFailureThreshold: 3, defaultRecoveryThreshold: 2 };
+  return { retentionDays: Number(env.DEFAULT_RETENTION_DAYS) || 14, aggregateRetentionDays: 180, publicStatus: true, defaultFailureThreshold: 3, defaultRecoveryThreshold: 2 };
 }
 
 async function getSettings(env: Env) {
@@ -329,7 +329,14 @@ async function publicStatus(env: Env, authorized: boolean) {
     groups.set(model.provider_name, item);
   }
   const incidents = await allIncidents(env);
-  return { status: [...groups.values()], summary: dashboard.summary, incidents: incidents.slice(0, 50).map((item) => ({
+  return { status: [...groups.values()], summary: dashboard.summary, models: dashboard.models.map((model) => ({
+    provider: model.provider_name,
+    model: model.name,
+    status: model.enabled ? model.current_status : 'DISABLED',
+    latency: model.last_latency_ms,
+    checkedAt: model.last_checked_at,
+    enabled: Boolean(model.enabled),
+  })), incidents: incidents.slice(0, 50).map((item) => ({
     id: item.id, provider_name: item.provider_name, model_name: item.model_name, status: item.status, started_at: item.started_at,
     resolved_at: item.resolved_at, title: item.title,
   })) };
