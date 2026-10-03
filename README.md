@@ -1,8 +1,22 @@
-# Signal AI — AI Model Availability Monitor
+# Signal AI — AI 模型可用性监控平台
 
 Signal AI 是一套部署在 Cloudflare 上的 AI API 可用性监控平台。它会按模型自己的周期发送小型真实模型请求，记录状态、HTTP 响应、耗时、TTFT、错误详情和 Incident，并提供一个 React 管理面板与可选公开状态页。
 
-## Features
+## 部署前先看：需要创建什么？
+
+生产部署只需要在 Cloudflare 创建 **1 个 D1 数据库**和 **1 个 KV 命名空间**，再设置 **4 个 Worker Secrets**。项目已在 `wrangler.toml` 配置每分钟 Cron；执行 `npm run deploy` 时会一起部署 Worker、前端静态资源和 Cron，不需要另外创建服务器或单独设置 Cron。
+
+本地开发不需要创建 Cloudflare D1/KV：Wrangler 会使用本地模拟资源。每个 Provider 的模型 API Key 在登录后的网页中填写，并使用 `ENCRYPTION_KEY` 加密保存到 D1；不需要为每个 Provider 单独创建 Cloudflare Secret。
+
+| 项目 | 是否需要 | 用途 |
+|---|---|---|
+| D1 数据库 | 需要 1 个 | 保存 Provider、模型、加密后的凭据、检测历史、Incident 和设置 |
+| KV 命名空间 | 需要 1 个 | 登录限流、通知冷却和历史聚合游标 |
+| Worker Secrets | 需要 4 个 | 管理员登录、会话签名和数据库凭据加密 |
+| Preview KV | 可选 | 仅在需要远程预览/测试环境时自行创建；本项目默认配置不需要 |
+| Cron Trigger | 不需要手动创建 | `wrangler.toml` 已配置为每分钟运行，随 Worker 部署 |
+
+## 功能
 
 - 自定义 Provider 和 Model；支持 OpenAI Compatible、Gemini、Anthropic Messages 与可配置 Custom API。
 - 真实模型调用，默认 Prompt 为 `Reply with exactly: OK`，最大输出为 5 tokens。可选关闭模型调用，改为 API Base URL 的 HTTP 可达性检测。
@@ -16,7 +30,7 @@ Signal AI 是一套部署在 Cloudflare 上的 AI API 可用性监控平台。�
 - Provider Key、自定义敏感 Header、通知目标凭据使用 `ENCRYPTION_KEY` 经 AES-GCM 加密后写入 D1。API 只返回遮罩值。
 - 响应式面板、Dark/Light 模式、模型搜索和过滤、批量启停/删除/强制检测，以及 `/status` 公开页。
 
-## Architecture
+## 架构
 
 ```text
 React + TypeScript + Vite + Tailwind
@@ -30,23 +44,23 @@ Cloudflare Worker ── Fetch API ── AI Provider APIs
       └── Workers Assets: Vite production build
 ```
 
-`worker/` contains the Worker, authentication, encrypted secret handling, provider adapters, persistence and scheduler. `src/` contains the single-page management and public status UIs. `migrations/0001_init.sql` defines all D1 tables, foreign keys and query indexes.
+`worker/` 目录包含 Worker、认证、加密凭据处理、Provider 适配器、数据持久化和调度器；`src/` 目录包含管理面板和公开状态页；`migrations/0001_init.sql` 定义 D1 数据表、外键和查询索引。
 
-## Requirements
+## 环境要求
 
-- Node.js 20.19+ or 22.12+ (Vite 8 runtime requirement)
+- Node.js 20.19+ 或 22.12+（Vite 8 的运行环境要求）
 - npm
-- A Cloudflare account for production deployment
-- Wrangler login for D1/KV creation and deployment
+- 用于生产部署的 Cloudflare 账号
+- 已登录 Wrangler，以便创建 D1/KV 并部署 Worker
 
-## Local development
+## 本地开发
 
 ```sh
 npm install
 npm run dev
 ```
 
-The dev command builds the initial asset bundle, creates `.dev.vars` from `.dev.vars.example` if needed, applies local D1 migrations, then starts Vite at `http://localhost:5173` and Wrangler at `http://localhost:8787`. Vite proxies `/api` to the local Worker. The starter login is `admin` / `change-this-local-password`; set your own password in the ignored `.dev.vars` file before adding real API keys.
+开发命令会先构建前端资源；如果 `.dev.vars` 不存在，则从 `.dev.vars.example` 复制一份；然后应用本地 D1 迁移，并启动 Vite（`http://localhost:5173`）和 Wrangler（`http://localhost:8787`）。Vite 会把 `/api` 请求代理到本地 Worker。默认登录账号是 `admin` / `change-this-local-password`；添加真实 API Key 前，请先在被 Git 忽略的 `.dev.vars` 文件中改掉默认密码。
 
 Useful local commands:
 
@@ -59,90 +73,128 @@ npm run smoke
 npm run visual-smoke
 ```
 
-`.dev.vars` is local-only and excluded from Git. It contains `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `SESSION_SECRET`, and `ENCRYPTION_KEY`. Use independent, random values for production.
-`npm run visual-smoke` additionally needs Microsoft Edge on Windows and the local dev servers; it checks mobile/desktop layouts, both themes and API-key redaction in the expanded error details.
+`.dev.vars` 仅用于本地开发，并已加入 Git 忽略规则。文件中包含 `ADMIN_USERNAME`、`ADMIN_PASSWORD`、`SESSION_SECRET` 和 `ENCRYPTION_KEY`；生产环境请为这些配置使用独立值。
+`npm run visual-smoke` 还需要 Windows 上的 Microsoft Edge 和正在运行的本地开发服务；该命令会检查手机/桌面布局、深浅两种主题，以及错误详情中的 API Key 脱敏。
 
-## Cloudflare setup and deployment
+## Cloudflare 部署
 
-Install packages and authenticate:
+以下命令在项目根目录运行。生产部署需要 Node.js 20.19+ 或 22.12+、Cloudflare 账号和 Wrangler 登录权限。
+
+### 1. 安装依赖并登录 Cloudflare
 
 ```sh
 npm install
 npx wrangler login
 ```
 
-Create the D1 database and the production and preview KV namespaces:
+### 2. 创建 D1 和 KV
 
 ```sh
 npx wrangler d1 create model-monitor
 npx wrangler kv namespace create model-monitor-cache
-npx wrangler kv namespace create model-monitor-cache-preview
 ```
 
-Copy the returned D1 database ID over the sample `00000000-0000-0000-0000-000000000001` in `database_id` in `wrangler.toml`. Copy the first KV ID over the sample `00000000000000000000000000000001` to `[[kv_namespaces]].id` and the second ID over `00000000000000000000000000000002` in `preview_id`. Keep the configured binding names `DB` and `CACHE`.
+这两个命令会分别返回 D1 `database_id` 和 KV 命名空间 `id`。打开 `wrangler.toml`，替换以下占位 ID，并保留绑定名称 `DB` 和 `CACHE`：
 
-Apply the schema and configure credentials as Cloudflare Worker Secrets:
+- 将 `[[d1_databases]]` 下的 `database_id` 替换为 D1 命令返回的 ID；数据库名保持 `model-monitor`。
+- 将 `[[kv_namespaces]]` 下的 `id` 替换为 KV 命令返回的 ID。
+
+本项目默认只绑定生产 D1/KV，不需要创建第二个预览 KV。若之后使用独立远程预览环境，再创建单独资源并按 Cloudflare 的预览配置进行绑定。
+
+### 3. 设置生产环境 Secrets
+
+下面四项必须设置。每条 `secret put` 命令会提示输入值；这些值由 Cloudflare 作为 Worker Secret 保存，不要提交到 Git，也不要写入前端变量：
 
 ```sh
-npx wrangler d1 migrations apply model-monitor --remote
 npx wrangler secret put ADMIN_USERNAME
 npx wrangler secret put ADMIN_PASSWORD
 npx wrangler secret put SESSION_SECRET
 npx wrangler secret put ENCRYPTION_KEY
 ```
 
-Enter each value at the prompt. Use a strong, unique password and at least 32 random bytes for both `SESSION_SECRET` and `ENCRYPTION_KEY`. Do not put production credentials in `[vars]`, frontend environment variables, or source control. Set `APP_ORIGIN` in `wrangler.toml` to the deployed application origin (for example, `https://monitor.example.com`) before deploying.
+`ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 是管理后台登录账号。请为 `ADMIN_PASSWORD` 设置强密码。`SESSION_SECRET` 和 `ENCRYPTION_KEY` 应分别使用独立的随机值，建议各生成至少 32 个随机字节。可运行下面命令两次，每次生成一个新值，并分别粘贴到对应提示中：
 
-Deploy the Worker and built frontend together:
+```sh
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
+```
+
+请妥善备份 `ENCRYPTION_KEY`。更换该值而不先迁移 D1 中已加密的数据，会导致已保存的 Provider Key、敏感 Header 和通知凭据无法解密。Provider API Key 在网页中添加后会加密保存在 D1，不需要逐个创建 Cloudflare Secret。
+
+### 4. 应用 D1 数据库迁移
+
+```sh
+npx wrangler d1 migrations apply model-monitor --remote
+```
+
+这会按 `migrations/` 中的 SQL 文件创建表、外键和索引。以后更新数据库结构时新增迁移文件，并使用 `npm run db:migrate:remote` 应用。
+
+### 5. 部署 Worker、前端和 Cron
 
 ```sh
 npm run deploy
 ```
 
-`npm run deploy` runs `npm run build` first, then `wrangler deploy`. The `[assets]` binding serves `dist/`; the Worker handles `/api/*`. The Cron Trigger is configured in `wrangler.toml` as `* * * * *` and is deployed with the Worker. Production database changes use:
+该命令会先执行 TypeScript 检查和 Vite 构建，再运行 `wrangler deploy`。Worker Assets 从 `dist/` 提供前端，Worker 在同一域名处理 `/api/*`。部署完成后，Cloudflare 会按 `wrangler.toml` 中的 `* * * * *` 每分钟触发调度器；无需另行创建 Cron。
+
+### 部署变量说明
+
+| 名称 | 类型 | 必需 | 默认/说明 |
+|---|---|---|---|
+| `ADMIN_USERNAME` | Worker Secret | 是 | 管理员登录名 |
+| `ADMIN_PASSWORD` | Worker Secret | 是 | 管理员登录密码 |
+| `SESSION_SECRET` | Worker Secret | 是 | HMAC 会话签名密钥，至少 24 个字符；建议随机 32 字节以上 |
+| `ENCRYPTION_KEY` | Worker Secret | 是 | 加密数据库中的 Provider Key 等敏感数据；建议随机 32 字节以上 |
+| `APP_ORIGIN` | Wrangler `[vars]` 变量 | 否 | 项目配置默认是本地 Vite 地址。生产前可改为实际网站 Origin；静态页面和 API 使用同一 Worker 域名时会自动按请求域名校验 |
+| `MAX_CHECKS_PER_CRON` | Wrangler `[vars]` 变量 | 否 | 每次 Cron 最多处理数量，默认 `50`，代码上限 `200` |
+| `CHECK_CONCURRENCY` | Wrangler `[vars]` 变量 | 否 | 同时执行的检测数量，默认 `5`，代码上限 `20` |
+| `DEFAULT_RETENTION_DAYS` | Wrangler `[vars]` 变量 | 否 | 详细检测数据保留天数，默认 `14`，范围 `7`–`30` |
+
+后三项已有默认值，通常不需要在 Cloudflare Dashboard 额外填写；如需调整，请修改 `wrangler.toml` 的 `[vars]` 后重新部署。`APP_ORIGIN` 不是密钥。登录和加密密钥不要放在 `[vars]` 中。
+
+### 本地数据库与部署数据库
+
+本地开发使用 Wrangler 的本地 D1/KV 模拟，不会读写 Cloudflare 上的生产数据：
+
+```sh
+npm run db:migrate:local
+```
+
+生产数据库迁移使用：
 
 ```sh
 npm run db:migrate:remote
 ```
 
-Local data changes use `npm run db:migrate:local`. D1 migrations are forward-only; back up production data before schema changes.
+D1 迁移采用增量方式，不要修改已经在生产环境执行过的迁移文件；修改表结构前请先备份生产数据。
 
-### Cloudflare resources
+## 添加 Provider
 
-- **D1**: required; stores provider metadata, encrypted secrets, models, checks, incidents, notification definitions, settings and hourly aggregates.
-- **KV**: required; login-attempt rate limits, notification cooldowns and the history aggregation cursor.
-- **Cron Trigger**: every minute; selects due enabled models and runs a bounded worker pool. The scheduler caps each tick at 50 checks by default; increase `MAX_CHECKS_PER_CRON` or `CHECK_CONCURRENCY` in `[vars]` only after considering provider rate limits and Worker execution limits.
-- **Secrets**: `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `SESSION_SECRET`, `ENCRYPTION_KEY` are set with `wrangler secret put`.
-- **Workers Assets**: Vite's `dist/` build is served by the same Worker origin, so browser API calls are same-origin.
+1. 登录后进入 **Providers → Add provider**。
+2. 选择 OpenAI Compatible、Gemini、Anthropic 或 Custom API。
+3. 填写 Provider 名称、公开的 HTTPS Base URL、模型名称和 API Key，并设置检测间隔、超时、Prompt 与固定延迟阈值。
+4. 在 **Advanced** 中设置请求方法、路径、Body、响应解析器、预期状态码、自定义 Header、Jitter、动态基线、样本数量及失败/恢复阈值。
+5. 点击 **Test connection**，保存前先执行一次真实的最小模型请求。
 
-## Add a Provider
+各 API 类型的请求方式：
 
-1. Sign in and choose **Providers → Add provider**.
-2. Choose OpenAI Compatible, Gemini, Anthropic, or Custom API.
-3. Enter provider name, public HTTPS base URL, model name and API Key. Choose interval, timeout, Prompt and fixed latency thresholds.
-4. Use **Advanced** to tune method/path/body, response parser, expected status, custom headers, jitter, dynamic baseline, sample count, and failure/recovery thresholds.
-5. Select **Test connection** to execute a real minimal model request before saving.
+- OpenAI Compatible：向 `POST {baseURL}/chat/completions` 发送包含 `model`、一条用户消息、`max_tokens`、`temperature` 的请求；启用 `stream: true`，并在收到 SSE 流时测量 TTFT。
+- Anthropic：向 `POST {baseURL}/v1/messages` 发送请求，包含必需的 `anthropic-version` Header，并启用流式响应。
+- Gemini：向 `POST {baseURL}/models/{model}:generateContent` 发送请求；当前使用非流式调用，因此不报告 TTFT。
+- Custom：可以配置相对 URL 路径、方法、Header、JSON/字符串 Body、预期状态码和可选的点号/数组索引响应路径。Body 支持 `{{model}}`、`{{prompt}}` 和 `{{max_tokens}}` 占位符。
 
-Provider-specific request behavior:
+响应解析支持 OpenAI 的 `choices[0].message.content`、`choices[0].text`、`output_text`、顶层 `content`，以及 Anthropic 文本块和 Gemini 的 `candidates[0].content.parts[0].text`。HTTP 请求成功但未找到可识别文本时，结果为 `UNKNOWN_RESPONSE`，不会直接计为服务故障。
 
-- OpenAI Compatible: `POST {baseURL}/chat/completions`, with `model`, one user message, `max_tokens`, `temperature`, and `stream: true` to measure TTFT when SSE is returned.
-- Anthropic: `POST {baseURL}/v1/messages`, with the required `anthropic-version` header and streaming enabled.
-- Gemini: `POST {baseURL}/models/{model}:generateContent`; TTFT is not reported for the non-streaming Gemini request.
-- Custom: relative URL path, method, headers, JSON/string body, expected status codes and optional dotted/indexed response path. The body can use `{{model}}`, `{{prompt}}`, and `{{max_tokens}}` placeholders.
+## 状态与延迟判断
 
-Response parsing recognizes OpenAI `choices[0].message.content`, `choices[0].text`, `output_text`, top-level `content`, Anthropic text blocks and Gemini `candidates[0].content.parts[0].text`. A successful HTTP response with no recognized text becomes `UNKNOWN_RESPONSE`; it is not counted as an outage.
+- 请求超时记为 `TIMEOUT`。HTTP/API 错误会保留对应错误分类；连续失败达到模型设置的阈值后，当前状态才转为 `DOWN`（或 `TIMEOUT`）。
+- 成功响应超过 Critical 延迟阈值时，会按失败健康检查处理；超过 Warning 阈值时标记为 `SLOW`。如果启用动态延迟基线，成功请求的延迟超过基线和设定比例时也会标记为 `SLOW`。
+- `UP`/`DOWN` 的恢复过程按模型配置的连续成功阈值判断。服务成功恢复后，在达到阈值前状态保持为 `RECOVERING`。
+- 延迟基线仅使用最近的成功样本。推荐使用去除最高和最低各 10% 样本后的平均值。
+- `SLOW`、`DOWN`、`TIMEOUT` 或 `ERROR` 状态会创建 Incident，并在恢复后关闭。连续失败尚未达到阈值时显示 `DEGRADED`，不会立即创建 `DOWN` Incident。
 
-## Status logic and latency
+## REST API 接口
 
-- A request timeout is a TIMEOUT. HTTP/API errors are stored with their raw error classification; after the configured consecutive-failure threshold, the current model state moves to DOWN (or TIMEOUT).
-- A successful response exceeding the Critical latency limit is treated as a failed health check; Warning marks SLOW. Dynamic latency can also mark a successful result SLOW when it exceeds the selected baseline by the configured percentage.
-- UP/DOWN recovery state changes use the per-model consecutive-success threshold. A successful recovery remains RECOVERING until that threshold is met.
-- Baselines use recent successful samples only. The recommended trimmed average removes the highest and lowest 10% before averaging.
-- Incidents open for SLOW, DOWN, TIMEOUT or ERROR states and resolve on recovery. Consecutive low-level failures under the threshold show DEGRADED and do not immediately open a DOWN incident.
-
-## REST API
-
-All routes are same-origin JSON and return `{ "success": true, "data": ... }` or `{ "success": false, "error": { "code": ..., "message": ... } }`. All management routes require the signed HttpOnly session cookie and `X-CSRF-Token` returned by `GET /api/auth/me`. `POST /api/auth/login` establishes a session. `POST /api/auth/logout` ends it.
+所有路由都使用同源 JSON，并统一返回 `{ "success": true, "data": ... }` 或 `{ "success": false, "error": { "code": ..., "message": ... } }`。管理接口需要已签名的 HttpOnly Session Cookie，以及 `GET /api/auth/me` 返回的 `X-CSRF-Token`。`POST /api/auth/login` 用于登录，`POST /api/auth/logout` 用于退出。
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -162,42 +214,42 @@ All routes are same-origin JSON and return `{ "success": true, "data": ... }` or
 | PUT / DELETE | `/api/notifications/:id` | Update or remove a destination |
 | GET | `/api/status` | Public provider status when enabled; otherwise 404 unless authenticated |
 
-The UI calls `/api/dashboard`, `/api/settings`, `/api/notifications`, and the REST resources above. A full API Key is never included in any response. Custom error bodies are truncated and sensitive values are redacted before being stored or returned.
+界面会调用 `/api/dashboard`、`/api/settings`、`/api/notifications` 和上表中的 REST 接口。任何响应都不会包含完整 API Key。自定义错误 Body 会截断，并在存储或返回前脱敏其中的敏感值。
 
-## Notifications
+## 通知配置
 
-Add a destination from **Settings → Notifications**. Supported types are generic JSON Webhook, Discord Webhook, Telegram Bot and Email via Webhook. Select events (DOWN, RECOVERED, SLOW, AUTH_ERROR, RATE_LIMIT) and the channel applies a 15-minute default cooldown. The cooldown is configurable from 5 minutes to 24 hours through the REST API. A webhook delivery is an outbound HTTPS POST.
+在 **Settings → Notifications** 中添加通知目标。支持通用 JSON Webhook、Discord Webhook、Telegram Bot，以及通过 Webhook 接入邮件服务。可选择 `DOWN`、`RECOVERED`、`SLOW`、`AUTH_ERROR` 和 `RATE_LIMIT` 等事件；默认冷却时间为 15 分钟，可通过 REST API 调整为 5 分钟至 24 小时。Webhook 使用 HTTPS POST 发送通知。
 
-Cloudflare Workers do not expose a native TCP SMTP socket. `Email via Webhook` is the compatible option for an email delivery service that accepts HTTPS JSON webhooks; direct SMTP is not implemented. Generic email provider webhook payloads may require a relay/adapter that reshapes Signal AI's JSON to the service's schema.
+Cloudflare Workers 不提供原生 TCP SMTP Socket。因此，邮件通知通过接受 HTTPS JSON Webhook 的邮件服务接入；项目未实现直接 SMTP。部分邮件服务要求特定的请求格式，可能需要中继服务将 Signal AI 的 JSON 转换为目标服务所需的格式。
 
-## Security notes
+## 安全说明
 
-- Set the four required Worker secrets before production use. Requests fail closed if the signing/encryption keys are missing.
-- `ENCRYPTION_KEY` encrypts provider API Keys, sensitive custom headers, and notification destinations before D1 writes. Cloudflare Secret bindings cannot be created dynamically from the dashboard, so user-entered per-provider keys use application-level AES-GCM encryption in D1.
-- The browser holds API keys only in an input's transient React state while editing/testing. Keys are not put in localStorage/sessionStorage, HTML attributes, request logs or API responses. The theme preference alone uses localStorage.
-- Session cookies are HttpOnly, SameSite=Strict, Secure on HTTPS, and signed with HMAC-SHA256. Mutating requests require an Origin check and session-bound CSRF token. Login attempts are rate-limited by client IP in KV.
-- The Worker serves the UI and API on one origin, does not enable wildcard CORS, and sets CSP, frame, MIME-sniffing, referrer and permissions headers on frontend assets.
-- Provider URLs require HTTPS except loopback HTTP during local development. Private IP literals, common metadata hosts and credential-bearing URLs are rejected. Only add API endpoints you trust; a Worker must fetch the configured provider URL to run a check.
-- Back up `ENCRYPTION_KEY` securely. Rotating it without decrypting and re-encrypting existing D1 values makes stored provider/notification credentials unreadable.
+- 生产环境必须设置前述四个 Worker Secrets。缺少会话签名或加密密钥时，相关请求会拒绝执行。
+- D1 写入前，`ENCRYPTION_KEY` 会加密 Provider API Key、敏感自定义 Header 和通知凭据。由于 Cloudflare Secret 绑定不能按用户输入动态创建，Provider Key 使用应用层 AES-GCM 加密后保存在 D1。
+- 浏览器仅在编辑或测试时，将 API Key 暂存在 React 输入状态中。Key 不会写入 localStorage/sessionStorage、HTML 属性、请求日志或 API 响应。主题偏好使用 localStorage。
+- Session Cookie 使用 HttpOnly、SameSite=Strict，并在 HTTPS 下设置 Secure；签名采用 HMAC-SHA256。修改类请求会检查 Origin 和与 Session 绑定的 CSRF Token。登录尝试按客户端 IP 在 KV 中限流。
+- Worker 在同一域名提供界面和 API，不启用通配符 CORS，并为前端资源设置 CSP、Frame、MIME 嗅探、Referrer 和 Permissions 安全 Header。
+- Provider URL 必须使用 HTTPS；本地开发时允许访问回环地址上的 HTTP。系统会拒绝私有 IP、常见云元数据地址和包含凭据的 URL。Worker 会主动请求所配置的 Provider URL，请只添加可信 API 地址。
+- 请安全备份 `ENCRYPTION_KEY`。如果不先解密并重新加密 D1 中的现有数据，直接轮换此密钥会导致已保存的 Provider/通知凭据无法读取。
 
-## Troubleshooting
+## 故障排查
 
-- **`npm run dev` cannot find npm**: install Node.js 20.19+ or 22.12+ and ensure npm is on PATH.
-- **Login says authentication is not configured**: verify local `.dev.vars` or production Worker Secrets include username, password and a 24+ character session secret.
-- **Provider secret cannot be decrypted**: confirm the same `ENCRYPTION_KEY` used when saving it. Do not replace this key without a migration plan.
-- **D1/KV binding error during deploy**: replace placeholder IDs in `wrangler.toml`, then rerun the D1 migration and deploy.
-- **No automatic check appears**: verify the Worker Cron Trigger is deployed, model is enabled, `next_check_at` is due, and Worker logs show no provider timeout/rate-limit errors.
-- **A model is UNKNOWN_RESPONSE**: its HTTP request succeeded but no recognized text path was found. Add a Custom response path or adjust the API type/body/response format.
-- **429 errors**: increase the interval, reduce the number of enabled model checks, or account for the provider's rate limits.
-- **Local login fails after changing `.dev.vars`**: restart `npm run dev` so Wrangler reloads local secrets.
+- **运行 `npm run dev` 时找不到 npm**：安装 Node.js 20.19+ 或 22.12+，并确认 npm 已加入 PATH。
+- **登录提示尚未配置认证**：检查本地 `.dev.vars` 或生产 Worker Secrets 是否包含用户名、密码和至少 24 个字符的 Session Secret。
+- **Provider 凭据无法解密**：确认当前 `ENCRYPTION_KEY` 与保存凭据时使用的值相同。不要在没有数据迁移方案时更换密钥。
+- **部署时出现 D1/KV 绑定错误**：检查 `wrangler.toml` 中的占位 ID 是否已替换，再重新应用 D1 迁移并部署。
+- **没有自动检测记录**：确认 Worker Cron 已部署、模型已启用、`next_check_at` 已到期，并检查 Worker 日志中的 Provider 超时或限流错误。
+- **模型状态为 `UNKNOWN_RESPONSE`**：HTTP 请求成功，但未找到可识别的文本路径。请设置 Custom 响应路径，或调整 API 类型、Body 和响应格式。
+- **出现 429 错误**：增加检测间隔、减少启用的模型数量，或遵守 Provider 的限流规则。
+- **修改 `.dev.vars` 后本地无法登录**：重启 `npm run dev`，让 Wrangler 重新加载本地变量。
 
-## Upgrade and data retention
+## 升级与数据保留
 
-Add new SQL files as the next ordered file in `migrations/`, apply locally with `npm run db:migrate:local`, deploy, then apply remotely with `npm run db:migrate:remote`. Do not edit a migration that has already been applied to production. The hourly retention task rolls detailed checks into `check_aggregates` and then removes details older than the configured 7–30 days; hourly aggregates remain for 90–180 days.
+升级数据库时，在 `migrations/` 中按顺序新增 SQL 文件，先用 `npm run db:migrate:local` 在本地应用并验证，再部署代码，最后用 `npm run db:migrate:remote` 更新生产数据库。不要修改已在生产环境执行过的迁移。每小时保留任务会将详细检测记录汇总到 `check_aggregates`，然后删除超过配置保留期（7–30 天）的详细记录；小时聚合数据保留 90–180 天。
 
-The scheduler and D1 are intentionally bounded per Cron invocation. When many checks are due, later models wait for a later minute. Long-range percentiles are derived from hourly percentile summaries after detail compaction and therefore are approximate; request counts, success counts, averages, min/max and uptime remain aggregated from the stored hourly data.
+每次 Cron 调度处理的任务数和 D1 操作量都有上限。如果到期检测过多，剩余模型会在之后的分钟继续排队检测。详细数据压缩后，较长时间范围的百分位数由小时级百分位摘要推算，因此属于近似值；请求数、成功数、平均值、最大/最小值和可用率则根据保存的小时数据聚合。
 
-## Validation commands
+## 本地验证命令
 
 ```sh
 npm run typecheck
@@ -208,4 +260,4 @@ npx wrangler d1 migrations list model-monitor --local
 npm run smoke
 ```
 
-`npm run smoke` expects `npm run dev` to be running. It starts a local fake OpenAI-compatible endpoint and exercises session/CSRF checks, provider/model CRUD, streaming TTFT, error redaction, history, incidents, batch actions, notifications and the public status route; it does not call an external AI provider.
+运行 `npm run smoke` 前需要先启动 `npm run dev`。该命令会启动本地模拟的 OpenAI Compatible 接口，并检查 Session/CSRF、Provider/Model 增删改查、流式 TTFT、错误脱敏、历史记录、Incident、批量操作、通知和公开状态页；它不会调用外部 AI Provider。

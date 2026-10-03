@@ -17,7 +17,6 @@ migrations_dir = "migrations"
 [[kv_namespaces]]
 binding = "CACHE"
 id = "00000000000000000000000000000001"
-preview_id = "00000000000000000000000000000002"
 
 [triggers]
 crons = ["* * * * *"]
