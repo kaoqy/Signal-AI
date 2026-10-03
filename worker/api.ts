@@ -2,6 +2,7 @@ import { constantTimeTextEqual, cookieValue, decryptSecret, encryptSecret, rando
 import { performCheck } from './checker';
 import { getJoinedModel, runModelCheck, testModel } from './monitor';
 import { allIncidents, dashboardStats, history, modelIncidents, modelStats } from './stats';
+import { DiscoveryError, discoverUpstreamModels, providerDiscoveryInput } from './upstream';
 import type { Env, ModelRow, ProviderRow, RequestFormat } from './types';
 
 const DEFAULT_PROMPT = 'Reply with exactly: OK';
@@ -284,6 +285,74 @@ async function addProviderModel(env: Env, providerId: string, input: JsonObject)
   return { id };
 }
 
+async function addProviderModels(env: Env, providerId: string, input: JsonObject): Promise<{ added: number; skipped: string[]; ids: string[] }> {
+  const provider = await env.DB.prepare('SELECT id FROM providers WHERE id=?').bind(providerId).first<{ id: string }>();
+  if (!provider) throw new ApiError('PROVIDER_NOT_FOUND', 'Provider was not found.', 404);
+  const rawModels = Array.isArray(input.models) ? input.models : [];
+  if (!rawModels.length) throw new ApiError('NO_MODELS_SELECTED', 'Select at least one model to add.', 400);
+  if (rawModels.length > 200) throw new ApiError('TOO_MANY_MODELS', 'Add up to 200 models at a time.', 400);
+  const settings = await getSettings(env);
+  const now = new Date().toISOString();
+  const existing = await env.DB.prepare('SELECT name FROM models WHERE provider_id=?').bind(providerId).all<{ name: string }>();
+  const known = new Set(existing.results.map((row) => row.name.trim().toLowerCase()));
+  const statements: D1PreparedStatement[] = [];
+  const ids: string[] = [];
+  const skipped: string[] = [];
+  const invalid: string[] = [];
+  for (const entry of rawModels) {
+    const item: JsonObject = entry && typeof entry === 'object' && !Array.isArray(entry) ? entry as JsonObject : { model: entry };
+    const name = asString(item.model ?? item.modelName ?? item.name);
+    if (!name) { invalid.push('(empty)'); continue; }
+    if (name.length > 200) { invalid.push(name.slice(0, 40)); continue; }
+    const key = name.toLowerCase();
+    if (known.has(key)) { skipped.push(name); continue; }
+    known.add(key);
+    const model = normalizedModel({
+      failureThreshold: settings.defaultFailureThreshold, recoveryThreshold: settings.defaultRecoveryThreshold,
+      ...item, model: name, enabled: item.enabled === undefined ? true : item.enabled,
+    });
+    const id = randomId();
+    ids.push(id);
+    statements.push(modelInsert(env, providerId, id, model, now));
+  }
+  if (invalid.length) throw new ApiError('INVALID_MODEL', `Some model names are not valid: ${invalid.slice(0, 5).join(', ')}.`, 400);
+  if (statements.length) await env.DB.batch(statements);
+  return { added: ids.length, skipped, ids };
+}
+
+function discoveryFormat(input: JsonObject, fallback?: RequestFormat): RequestFormat {
+  const supplied = asString(input.requestFormat ?? input.request_format);
+  const legacyType = asString(input.apiType ?? input.api_type);
+  const legacy = legacyType === 'anthropic' ? 'anthropic_messages' : legacyType === 'gemini' ? 'gemini_generate' : 'openai_chat';
+  const format = (supplied || fallback || legacy) as RequestFormat;
+  if (!requestFormats.has(format)) throw new ApiError('INVALID_API_TYPE', 'Choose a supported AI request format.', 400);
+  return format;
+}
+
+async function discoverModels(env: Env, input: JsonObject) {
+  const providerId = asString(input.providerId ?? input.provider_id);
+  const rawKey = asString(input.apiKey ?? input.api_key);
+  const suppliedKey = rawKey && !rawKey.includes('\u2022') ? rawKey : null;
+  let config: { requestFormat: RequestFormat; baseUrl: string; apiKey: string | null; headers: Record<string, string> };
+  if (providerId) {
+    const provider = await env.DB.prepare('SELECT * FROM providers WHERE id=?').bind(providerId).first<ProviderRow>();
+    if (!provider) throw new ApiError('PROVIDER_NOT_FOUND', 'Provider was not found.', 404);
+    const baseUrl = asString(input.baseUrl ?? input.base_url, provider.base_url);
+    validateUrl(baseUrl, 'API Base URL');
+    const stored = await providerDiscoveryInput(env, provider, suppliedKey);
+    config = {
+      requestFormat: discoveryFormat(input, provider.request_format), baseUrl,
+      apiKey: suppliedKey ?? stored.apiKey, headers: { ...stored.headers, ...parseObject(input.headers) },
+    };
+  } else {
+    const baseUrl = asString(input.baseUrl ?? input.base_url);
+    validateUrl(baseUrl, 'API Base URL');
+    config = { requestFormat: discoveryFormat(input), baseUrl, apiKey: suppliedKey, headers: parseObject(input.headers) };
+  }
+  const models = await discoverUpstreamModels({ requestFormat: config.requestFormat, baseUrl: config.baseUrl, apiKey: config.apiKey, headers: config.headers });
+  return { models, count: models.length };
+}
+
 async function listProviders(env: Env) {
   const providers = await env.DB.prepare('SELECT * FROM providers ORDER BY name').all<ProviderRow>();
   const result = [];
@@ -505,8 +574,11 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
     if (path === '/api/providers' && request.method === 'GET') return success(await listProviders(env));
     if (path === '/api/providers' && request.method === 'POST') return success(await saveProvider(env, await bodyJson(request)), 201);
     if (path === '/api/providers/test' && request.method === 'POST') return success(await checkProviderNow(env, await bodyJson(request)));
+    if (path === '/api/providers/discover' && request.method === 'POST') return success(await discoverModels(env, await bodyJson(request)));
     const providerModelsMatch = path.match(/^\/api\/providers\/([^/]+)\/models$/);
     if (providerModelsMatch && request.method === 'POST') return success(await addProviderModel(env, providerModelsMatch[1], await bodyJson(request)), 201);
+    const providerModelsBatchMatch = path.match(/^\/api\/providers\/([^/]+)\/models\/batch$/);
+    if (providerModelsBatchMatch && request.method === 'POST') return success(await addProviderModels(env, providerModelsBatchMatch[1], await bodyJson(request)), 201);
     const providerMatch = path.match(/^\/api\/providers\/([^/]+)$/);
     if (providerMatch && request.method === 'PUT') return success(await saveProvider(env, await bodyJson(request), providerMatch[1]));
     if (providerMatch && request.method === 'DELETE') {
@@ -576,6 +648,7 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
     return failure('NOT_FOUND', 'API endpoint was not found.', 404);
   } catch (error) {
     if (error instanceof ApiError) return failure(error.code, error.message, error.status);
+    if (error instanceof DiscoveryError) return json({ success: false, error: { code: error.code, message: error.message, suggestion: error.suggestion } }, error.status);
     const message = error instanceof Error ? error.message.replace(/(?:sk-|key=)[^\s&]+/gi, '[redacted]') : 'Unexpected server error.';
     console.error('api request failed', request.method, path, message);
     return failure('INTERNAL_ERROR', 'The request could not be completed. Check the server configuration and try again.', 500);
@@ -590,3 +663,4 @@ export async function testSavedModel(env: Env, id: string) {
   const result = await testModel(env, id);
   return result;
 }
+

@@ -153,7 +153,7 @@ npm run deploy
 | `ADMIN_PASSWORD` | Worker Secret | 是 | 管理员登录密码 |
 | `SESSION_SECRET` | Worker Secret | 是 | HMAC 会话签名密钥，至少 24 个字符；建议随机 32 字节以上 |
 | `ENCRYPTION_KEY` | Worker Secret | 是 | 加密数据库中的 Provider Key 等敏感数据；建议随机 32 字节以上 |
-| `APP_ORIGIN` | Wrangler `[vars]` 变量 | 否 | 项目配置默认是本地 Vite 地址。生产前可改为实际网站 Origin；静态页面和 API 使用同一 Worker 域名时会自动按请求域名校验 |
+| `APP_ORIGIN` | Wrangler `[vars]` / `.dev.vars` | 否 | 允许的跨域前端 Origin。生产已设为部署域名；本地开发通过 `.dev.vars` 覆盖为 `http://localhost:5173`。静态页面与 API 同域时会自动按请求域名校验 |
 | `MAX_CHECKS_PER_CRON` | Wrangler `[vars]` 变量 | 否 | 每次 Cron 最多处理数量，默认 `50`，代码上限 `200` |
 | `CHECK_CONCURRENCY` | Wrangler `[vars]` 变量 | 否 | 同时执行的检测数量，默认 `5`，代码上限 `20` |
 | `DEFAULT_RETENTION_DAYS` | Wrangler `[vars]` 变量 | 否 | 详细检测数据保留天数，默认 `14`，范围 `7`–`30` |

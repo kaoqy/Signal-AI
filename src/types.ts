@@ -19,6 +19,10 @@ export interface Model {
   warning_latency_ms: number;
   critical_latency_ms: number;
   interval_seconds: number;
+  jitter_seconds: number;
+  timeout_ms: number;
+  floating_enabled: number;
+  floating_percent: number;
   uptime?: number | null;
 }
 

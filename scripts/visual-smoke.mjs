@@ -196,9 +196,9 @@ try {
   const detailView = await navigate(client, `/admin/models/${mockModelId}`, 'dark', 390, 844);
   const detailEntries = await client.evaluate(`document.querySelectorAll('.history-entry').length`);
   assert.ok(detailEntries > 0, 'model details should show the failed check');
-  await client.evaluate(`document.querySelector('.history-entry')?.setAttribute('open', 'true')`);
+  await client.evaluate(`(document.querySelector('.history-entry')?.setAttribute('open', 'true'), document.querySelector('.history-technical')?.setAttribute('open', 'true'))`);
   const detailContent = await client.evaluate(`document.querySelector('.detail-history')?.innerText ?? ''`);
-  assert.match(detailContent, /AUTH_ERROR/);
+  assert.match(detailContent, /Authentication failed/i);
   assert.match(detailContent, /Response headers/i);
   assert.match(detailContent, /Response body/i);
   assert.ok(!detailContent.includes(errorSecret), 'the model details UI must not expose the API key echoed by the provider');
@@ -207,7 +207,7 @@ try {
   const detailShot = await client.command('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, fromSurface: true });
   const detailPath = path.join(screenshots, 'model-error-details-390-dark.png');
   await writeFile(detailPath, Buffer.from(detailShot.data, 'base64'));
-  observations.push({ ...detailView, detailFields: ['AUTH_ERROR', 'Response headers', 'Response body'], screenshot: detailPath });
+  observations.push({ ...detailView, detailFields: ['Authentication failed', 'Response headers', 'Response body'], screenshot: detailPath });
   for (const route of ['/admin/models', '/admin/providers', '/admin/settings', '/status', `/admin/models/${mockModelId}`]) {
     observations.push(await navigate(client, route, 'dark', 320, 800));
   }

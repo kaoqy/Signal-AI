@@ -14,8 +14,13 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (options.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
   if (options.method && !['GET', 'HEAD'].includes(options.method.toUpperCase()) && csrfToken) headers.set('x-csrf-token', csrfToken);
   const response = await fetch(path, { ...options, headers, credentials: 'same-origin' });
-  const result = await response.json() as ApiResult<T>;
-  if (!response.ok || !result.success) throw new Error(result.error?.message ?? `Request failed (${response.status}).`);
+  const result = await response.json() as ApiResult<T> & { error?: { code?: string; message?: string; suggestion?: string } };
+  if (!response.ok || !result.success) {
+    const error = new Error(result.error?.message ?? `Request failed (${response.status}).`) as Error & { code?: string; suggestion?: string };
+    error.code = result.error?.code;
+    error.suggestion = result.error?.suggestion;
+    throw error;
+  }
   return result.data as T;
 }
 
@@ -358,6 +363,26 @@ function formatDuration(value: number | null | undefined): string {
 }
 function formatJson(value: string): string {
   try { return JSON.stringify(JSON.parse(value) as unknown, null, 2); } catch { return value; }
+}
+
+const errorGuidance: Record<string, { label: string; suggestion: string }> = {
+  AUTH_ERROR: { label: 'Authentication failed', suggestion: 'Check that the API key is valid and has access to this model.' },
+  RATE_LIMIT: { label: 'Rate limited upstream', suggestion: 'The provider is throttling requests. Lower the check frequency or retry later.' },
+  TIMEOUT: { label: 'The model timed out', suggestion: 'The model took too long to respond. Try a smaller request or a longer timeout.' },
+  NETWORK_ERROR: { label: 'Could not reach the provider', suggestion: 'The provider could not be reached. Check the base URL and network access.' },
+  SERVER_ERROR: { label: 'The provider had a server error', suggestion: 'The provider returned a server error. Try again shortly.' },
+  MODEL_NOT_FOUND: { label: 'Model not available', suggestion: 'The model name may be wrong or no longer available upstream.' },
+  INVALID_REQUEST: { label: 'The request was rejected', suggestion: 'The provider rejected the request. Review the model and provider configuration.' },
+  PROVIDER_ERROR: { label: 'Unexpected provider response', suggestion: 'The provider returned an unexpected response. Review the request format.' },
+  UNKNOWN_ERROR: { label: 'Unexpected error', suggestion: 'An unexpected error occurred. Try running the check again.' },
+};
+function errorLabel(type: string | null | undefined): string {
+  const guidance = errorGuidance[type ?? ''];
+  if (guidance) return tr(guidance.label);
+  return type ? tr(statusLabels[type] ?? type) : tr('Unknown');
+}
+function errorSuggestion(type: string | null | undefined): string | null {
+  return errorGuidance[type ?? '']?.suggestion ?? null;
 }function timeAgo(date: string | null | undefined): string {
   if (!date) return tr('Never checked');
   const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(date)) / 1000));
@@ -453,101 +478,250 @@ function ProvidersPage({ providers, onAdd, onEdit, onOpenModel, onRefresh, notif
 
 type ProviderDraft = Record<string, string | number | boolean>;
 const intervalPresets: Array<[number, string]> = [[60, '1 minute'], [120, '2 minutes'], [300, '5 minutes'], [600, '10 minutes'], [900, '15 minutes'], [1800, '30 minutes'], [3600, '1 hour'], [21600, '6 hours'], [43200, '12 hours'], [86400, '24 hours']];
-const defaultDraft: ProviderDraft = {
-  name: '', requestFormat: 'openai_chat', baseUrl: 'https://api.openai.com/v1', apiKey: '', model: '', intervalSeconds: 300,
-  timeoutMs: 15000, prompt: 'Reply with exactly: OK', maxTokens: 5, enabled: true,
+const floatingPresets: Array<[number, string]> = [[10, '10%'], [20, '20%'], [30, '30%'], [50, '50%'], [100, '100%']];
+const defaultModelDraft = { enabled: true, intervalSeconds: 300, jitterSeconds: 0, floatingEnabled: false, floatingPercent: 30 };
+
+/** A model row within the provider editor: an existing saved model or one picked from the upstream list. */
+type ModelDraft = {
+  key: string;
+  id?: string;
+  name: string;
+  enabled: boolean;
+  intervalSeconds: number;
+  jitterSeconds: number;
+  floatingEnabled: boolean;
+  floatingPercent: number;
+  status: Status;
+  lastCheckedAt: string | null;
+  lastLatencyMs: number | null;
+  selected: boolean;
+  saved: boolean;
+  label?: string;
+  original?: { enabled: boolean; intervalSeconds: number; jitterSeconds: number; floatingEnabled: boolean; floatingPercent: number };
 };
 
+type UpstreamModel = { id: string; label: string; contextLength: number | null };
+
+const draftFromModel = (model: Model): ModelDraft => {
+  const intervalSeconds = model.interval_seconds || 300;
+  const jitterSeconds = model.jitter_seconds || 0;
+  const floatingEnabled = Boolean(model.floating_enabled);
+  const floatingPercent = model.floating_percent || 30;
+  return {
+    key: model.id, id: model.id, name: model.name, enabled: Boolean(model.enabled),
+    intervalSeconds, jitterSeconds, floatingEnabled, floatingPercent,
+    status: model.enabled ? model.current_status : 'DISABLED',
+    lastCheckedAt: model.last_checked_at, lastLatencyMs: model.last_latency_ms,
+    selected: false, saved: true,
+    original: { enabled: Boolean(model.enabled), intervalSeconds, jitterSeconds, floatingEnabled, floatingPercent },
+  };
+};
+
+function intervalOptions(current: number): Array<[number, string]> {
+  const options = [...intervalPresets];
+  if (current && !options.some(([seconds]) => seconds === current)) options.push([current, formatInterval(current)]);
+  return options;
+}
+
 function ProviderModal({ provider, onClose, onSaved, notify }: { provider: Provider | null; onClose: () => void; onSaved: (message: string) => void; notify: (message: string, kind?: 'success' | 'error') => void }) {
-  const model = provider?.models[0];
-  const [draft, setDraft] = useState<ProviderDraft>(() => provider ? {
-    ...defaultDraft, name: provider.name, requestFormat: provider.request_format, baseUrl: provider.base_url, apiKey: '',
-  } : defaultDraft);
-  const [customInterval, setCustomInterval] = useState(() => Boolean(model && !intervalPresets.some(([seconds]) => seconds === model.interval_seconds)));
-  const [newModel, setNewModel] = useState('');
-  const [addingModel, setAddingModel] = useState(false);
-  const [testing, setTesting] = useState(false);
+  const [draft, setDraft] = useState<ProviderDraft>(() => ({
+    name: provider?.name ?? '', requestFormat: provider?.request_format ?? 'openai_chat',
+    baseUrl: provider?.base_url ?? 'https://api.openai.com/v1', apiKey: '',
+  }));
+  const [rows, setRows] = useState<ModelDraft[]>(() => provider ? provider.models.map(draftFromModel) : []);
+  const [upstream, setUpstream] = useState<UpstreamModel[] | null>(null);
+  const [discovering, setDiscovering] = useState(false);
+  const [discoverError, setDiscoverError] = useState<{ message: string; suggestion?: string } | null>(null);
+  const [discoverEmpty, setDiscoverEmpty] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [testResult, setTestResult] = useState<Record<string, any> | null>(null);
+  const [removingIds, setRemovingIds] = useState<string[]>([]);
+  const [checkingIds, setCheckingIds] = useState<string[]>([]);
   const change = (key: string, value: string | number | boolean) => setDraft((current) => ({ ...current, [key]: value }));
   const val = (key: string) => typeof draft[key] === 'boolean' ? '' : draft[key] as string | number;
+  const updateRow = (key: string, patch: Partial<ModelDraft>) => setRows((current) => current.map((row) => row.key === key ? { ...row, ...patch } : row));
+  const selectedRows = rows.filter((row) => row.selected && !row.saved);
+  const savedCount = rows.filter((row) => row.saved).length;
+
+  async function discover() {
+    setDiscovering(true); setDiscoverError(null);
+    try {
+      const result = await api<{ models: UpstreamModel[]; count: number }>('/api/providers/discover', { method: 'POST', body: JSON.stringify({
+        providerId: provider?.id, requestFormat: draft.requestFormat, baseUrl: draft.baseUrl, apiKey: draft.apiKey,
+      }) });
+      setUpstream(result.models);
+      setDiscoverEmpty(!result.models.length);
+      if (!result.models.length) notify(tr('The upstream service returned no available models. Add model names manually.'), 'error');
+    } catch (error) {
+      setUpstream(null); setDiscoverEmpty(false);
+      const payload = error instanceof Error ? (error as Error & { suggestion?: string }) : null;
+      setDiscoverError({ message: payload?.message ?? tr('Could not fetch upstream models.'), suggestion: payload?.suggestion });
+    } finally { setDiscovering(false); }
+  }
+
+  function toggleAllUpstream(next: boolean) {
+    if (!upstream?.length) return;
+    setRows((current) => {
+      const saved = new Set(current.filter((row) => row.saved).map((row) => row.name.toLowerCase()));
+      const kept = current.filter((row) => row.saved || !row.key.startsWith('upstream:'));
+      const existing = new Map(kept.map((row) => [row.name.toLowerCase(), row] as const));
+      if (!next) return kept;
+      const additions: ModelDraft[] = [];
+      for (const model of upstream) {
+        const key = model.id.toLowerCase();
+        if (saved.has(key) || existing.has(key)) continue;
+        additions.push({ key: `upstream:${model.id}`, name: model.id, label: model.label, status: 'UNKNOWN', lastCheckedAt: null, lastLatencyMs: null, selected: true, saved: false, ...defaultModelDraft });
+      }
+      return [...kept, ...additions];
+    });
+  }
+
+  function toggleUpstream(model: UpstreamModel, next: boolean) {
+    setRows((current) => {
+      const existing = current.find((row) => !row.saved && row.name.toLowerCase() === model.id.toLowerCase());
+      if (!next) {
+        if (existing) return current.filter((row) => row.key !== existing.key);
+        return current;
+      }
+      if (existing) return current.map((row) => row.key === existing.key ? { ...row, selected: true } : row);
+      if (current.some((row) => row.saved && row.name.toLowerCase() === model.id.toLowerCase())) return current;
+      return [...current, { key: `upstream:${model.id}`, name: model.id, label: model.label, status: 'UNKNOWN', lastCheckedAt: null, lastLatencyMs: null, selected: true, saved: false, ...defaultModelDraft }];
+    });
+  }
+
+  function addManual() {
+    const key = `manual:${Date.now()}:${Math.random().toString(36).slice(2, 7)}`;
+    setRows((current) => [...current, { key, name: '', status: 'UNKNOWN', lastCheckedAt: null, lastLatencyMs: null, selected: false, saved: false, ...defaultModelDraft }]);
+  }
+
+  async function removeRow(row: ModelDraft) {
+    if (!row.id) { setRows((current) => current.filter((item) => item.key !== row.key)); return; }
+    setRemovingIds((ids) => [...ids, row.key]);
+    try {
+      await api(`/api/models/${row.id}`, { method: 'DELETE' });
+      setRows((current) => current.filter((item) => item.key !== row.key));
+      notify(tr('Model deleted.'));
+    } catch (error) { notify(error instanceof Error ? error.message : tr('Could not delete model.'), 'error'); }
+    finally { setRemovingIds((ids) => ids.filter((id) => id !== row.key)); }
+  }
+
+  async function checkModel(row: ModelDraft) {
+    if (!row.id || checkingIds.includes(row.key)) return;
+    setCheckingIds((ids) => [...ids, row.key]);
+    try {
+      const result = await api<{ status: Status; latency: number; available: boolean | null }>(`/api/models/${row.id}/check`, { method: 'POST', body: '{}' });
+      updateRow(row.key, { status: result.status, lastLatencyMs: result.latency, lastCheckedAt: new Date().toISOString() });
+      notify(result.available === true ? `${tr('Check complete')} · ${formatMs(result.latency)}` : `${tr('Check complete')} · ${tr(statusLabels[result.status])}`,
+        result.available === true ? 'success' : 'error');
+    } catch (error) { notify(error instanceof Error ? error.message : tr('Could not check this model.'), 'error'); }
+    finally { setCheckingIds((ids) => ids.filter((id) => id !== row.key)); }
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    const named = rows.filter((row) => row.name.trim());
+    if (!provider && !named.length) { notify(tr('Add at least one model before saving the provider.'), 'error'); return; }
+    const duplicate = new Set<string>();
+    const seen = new Set<string>();
+    for (const row of named) {
+      const key = row.name.trim().toLowerCase();
+      if (seen.has(key)) duplicate.add(row.name.trim());
+      seen.add(key);
+    }
+    if (duplicate.size) { notify(`${tr('Duplicate model names:')} ${[...duplicate].join(', ')}`, 'error'); return; }
     setSaving(true);
     try {
-      const payload: Record<string, unknown> = {
-        name: draft.name, requestFormat: draft.requestFormat, baseUrl: draft.baseUrl,
-        apiKey: draft.apiKey, enabled: draft.enabled, headers: provider ? provider.headers : {},
+      const providerPayload: Record<string, unknown> = {
+        name: draft.name, requestFormat: draft.requestFormat, baseUrl: draft.baseUrl, apiKey: draft.apiKey, headers: provider?.headers ?? {},
       };
-      if (!provider || draft.model) payload.model = draft.model;
-      if (!provider || draft.model) Object.assign(payload, {
-        intervalSeconds: draft.intervalSeconds, timeoutMs: draft.timeoutMs, prompt: draft.prompt, maxTokens: draft.maxTokens,
-      });
-      await api(provider ? `/api/providers/${provider.id}` : '/api/providers', { method: provider ? 'PUT' : 'POST', body: JSON.stringify(payload) });
+      const pending = named.filter((row) => !row.saved);
+      const firstPending = pending[0];
+      if (!provider && firstPending) {
+        providerPayload.model = firstPending.name;
+        providerPayload.enabled = firstPending.enabled;
+        providerPayload.intervalSeconds = firstPending.intervalSeconds;
+        providerPayload.jitterSeconds = firstPending.jitterSeconds;
+        providerPayload.floatingEnabled = firstPending.floatingEnabled;
+        providerPayload.floatingPercent = firstPending.floatingPercent;
+      }
+      const saved = await api<{ id: string }>(provider ? `/api/providers/${provider.id}` : '/api/providers', { method: provider ? 'PUT' : 'POST', body: JSON.stringify(providerPayload) });
+      const providerId = provider?.id ?? saved.id;
+      const remaining = pending.filter((row) => row !== firstPending || provider);
+      if (remaining.length) {
+        await api(`/api/providers/${providerId}/models/batch`, { method: 'POST', body: JSON.stringify({ models: remaining.map((row) => ({
+          model: row.name.trim(), enabled: row.enabled, intervalSeconds: row.intervalSeconds, jitterSeconds: row.jitterSeconds,
+          floatingEnabled: row.floatingEnabled, floatingPercent: row.floatingPercent,
+        })) }) });
+      }
+      const dirty = rows.filter((row) => row.saved && row.id && row.original && (
+        row.enabled !== row.original.enabled || row.intervalSeconds !== row.original.intervalSeconds ||
+        row.jitterSeconds !== row.original.jitterSeconds || row.floatingEnabled !== row.original.floatingEnabled ||
+        row.floatingPercent !== row.original.floatingPercent));
+      await Promise.all(dirty.map((row) => api(`/api/models/${row.id}`, { method: 'PUT', body: JSON.stringify({
+        enabled: row.enabled, intervalSeconds: row.intervalSeconds, jitterSeconds: row.jitterSeconds,
+        floatingEnabled: row.floatingEnabled, floatingPercent: row.floatingPercent,
+      }) })));
       onSaved(provider ? tr('Provider updated.') : tr('Provider added and ready to monitor.'));
     } catch (error) { notify(error instanceof Error ? error.message : tr('Could not save provider.'), 'error'); }
     finally { setSaving(false); }
   }
 
-  async function testConnection(modelName = '') {
-    setTesting(true); setTestResult(null);
-    try {
-      const result = await api<Record<string, any>>('/api/providers/test', { method: 'POST', body: JSON.stringify({
-        providerId: provider?.id, name: draft.name, requestFormat: draft.requestFormat, baseUrl: draft.baseUrl,
-        apiKey: draft.apiKey, model: modelName || draft.model || model?.name || '', intervalSeconds: draft.intervalSeconds,
-        timeoutMs: draft.timeoutMs, prompt: draft.prompt, maxTokens: draft.maxTokens, headers: provider ? provider.headers : {},
-      }) });
-      setTestResult(result);
-    } catch (error) { setTestResult({ success: false, error: error instanceof Error ? error.message : tr('Connection test failed.') }); }
-    finally { setTesting(false); }
-  }
-
-  async function addModel(event: FormEvent) {
-    event.preventDefault();
-    if (!provider || !newModel.trim()) return;
-    setAddingModel(true);
-    try {
-      await api(`/api/providers/${provider.id}/models`, { method: 'POST', body: JSON.stringify({ model: newModel.trim() }) });
-      setNewModel('');
-      onSaved(tr('Model added.'));
-    } catch (error) { notify(error instanceof Error ? error.message : tr('Could not add model.'), 'error'); }
-    finally { setAddingModel(false); }
-  }
-
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="modal provider-editor" role="dialog" aria-modal="true" aria-labelledby="provider-modal-title">
     <div className="modal-header"><div><div className="page-eyebrow">{tr(provider ? 'CONFIGURATION' : 'NEW CONNECTION')}</div><h2 id="provider-modal-title">{tr(provider ? 'Edit provider' : 'Add provider')}</h2></div><button className="icon-button" onClick={onClose} aria-label={tr("Close")}><X size={18} /></button></div>
     <form onSubmit={submit}>
-      <div className="modal-body"><div className="form-grid">
-        <label className="span-2">{tr("Provider name")}<input value={val('name')} onChange={(event) => change('name', event.target.value)} placeholder={tr("e.g. OpenRouter Production")} required /></label>
-        <label className="span-2">{tr("Request format")}<select value={val('requestFormat')} onChange={(event) => { const next = event.target.value; change('requestFormat', next); if (next === 'gemini_generate') change('baseUrl', 'https://generativelanguage.googleapis.com/v1beta'); else if (next === 'anthropic_messages') change('baseUrl', 'https://api.anthropic.com'); else change('baseUrl', 'https://api.openai.com/v1'); }}>
-          <option value="openai_chat">{tr("OpenAI Chat Completions")}</option>
-          <option value="openai_responses">{tr("OpenAI Responses")}</option>
-          <option value="anthropic_messages">{tr("Anthropic Messages")}</option>
-          <option value="gemini_generate">{tr("Gemini generateContent")}</option>
-        </select><small>{tr("Request paths, headers and bodies are built automatically.")}</small></label>
-        <label className="span-2">{tr("API base URL")}<input type="url" value={val('baseUrl')} onChange={(event) => change('baseUrl', event.target.value)} placeholder={tr("https://api.example.com/v1")} required /><small>{tr("Use the provider root, for example https://openrouter.ai/api/v1.")}</small></label>
-        <label className="span-2">{tr("API key ")}<input type="password" value={val('apiKey')} onChange={(event) => change('apiKey', event.target.value)} placeholder={provider?.keyHint ? getLanguage() === 'zh-CN' ? `已加密保存 · ${provider.keyHint} · 留空表示不修改` : `Saved securely · ${provider.keyHint} · leave blank to keep` : tr('Paste your API key')} autoComplete="new-password" /><small>{tr("Sent once, encrypted before storage, and never shown again.")}</small></label>
-        {provider ? <>
-          <div className="form-separator span-2"><span>{tr("MODELS")}</span></div>
-          <div className="span-2 model-manage-list">{provider.models.map((item) => <div className="model-manage-row" key={item.id}><StatusBadge status={item.enabled ? item.current_status : 'DISABLED'} small /><strong>{item.name}</strong><span>{item.last_latency_ms == null ? '—' : formatMs(item.last_latency_ms)}</span></div>)}
-            <form className="provider-add-model" onSubmit={addModel}><input value={newModel} onChange={(event) => setNewModel(event.target.value)} placeholder={tr('Add another model name')} required /><button className="button secondary tiny-button" type="submit" disabled={addingModel}>{addingModel ? <LoaderCircle size={13} className="spin" /> : <><Plus size={13} /> {tr('Add')}</>}</button></form>
+      <div className="modal-body">
+        <div className="editor-section">
+          <div className="form-separator"><span>{tr('PROVIDER')}</span></div>
+          <div className="form-grid">
+            <label>{tr("Provider name")}<input value={val('name')} onChange={(event) => change('name', event.target.value)} placeholder={tr("e.g. OpenRouter Production")} required /></label>
+            <label>{tr("Request format")}<select value={val('requestFormat')} onChange={(event) => { const next = event.target.value; change('requestFormat', next); if (next === 'gemini_generate') change('baseUrl', 'https://generativelanguage.googleapis.com/v1beta'); else if (next === 'anthropic_messages') change('baseUrl', 'https://api.anthropic.com'); else change('baseUrl', 'https://api.openai.com/v1'); setUpstream(null); setDiscoverError(null); setDiscoverEmpty(false); }}>
+              <option value="openai_chat">{tr("OpenAI Chat Completions")}</option>
+              <option value="openai_responses">{tr("OpenAI Responses")}</option>
+              <option value="anthropic_messages">{tr("Anthropic Messages")}</option>
+              <option value="gemini_generate">{tr("Gemini generateContent")}</option>
+            </select><small>{tr("Request paths, headers and bodies are built automatically.")}</small></label>
+            <label className="span-2">{tr("API base URL")}<input type="url" value={val('baseUrl')} onChange={(event) => { change('baseUrl', event.target.value); setUpstream(null); setDiscoverError(null); setDiscoverEmpty(false); }} placeholder={tr("https://api.example.com/v1")} required /><small>{tr("Use the provider root, for example https://openrouter.ai/api/v1.")}</small></label>
+            <label className="span-2">{tr("API key ")}<input type="password" value={val('apiKey')} onChange={(event) => change('apiKey', event.target.value)} placeholder={provider?.keyHint ? (getLanguage() === 'zh-CN' ? `已加密保存 · ${provider.keyHint} · 留空表示不修改` : `Saved securely · ${provider.keyHint} · leave blank to keep`) : tr('Paste your API key')} autoComplete="new-password" /><small>{tr("Sent once, encrypted before storage, and never shown again.")}</small></label>
           </div>
-        </> : <>
-          <div className="form-separator span-2"><span>{tr("FIRST MODEL")}</span></div>
-          <label>{tr("Model name")}<input value={val('model')} onChange={(event) => change('model', event.target.value)} placeholder={tr("e.g. gpt-4o-mini")} required /></label>
-          <label>{tr("Check interval")}<select value={customInterval ? 'custom' : String(val('intervalSeconds'))} onChange={(event) => { if (event.target.value === 'custom') setCustomInterval(true); else { setCustomInterval(false); change('intervalSeconds', Number(event.target.value)); } }}>{intervalPresets.map(([seconds, label]) => <option key={seconds} value={seconds}>{tr(label)}</option>)}<option value="custom">{tr("Custom interval")}</option></select></label>
-          {customInterval && <label className="span-2">{tr("Custom interval (seconds)")}<input type="number" min="60" max="86400" step="1" value={val('intervalSeconds')} onChange={(event) => change('intervalSeconds', Number(event.target.value))} /><small>{tr("Choose any interval from 60 seconds to 24 hours. You can set this separately for each model later.")}</small></label>}
-          <label>{tr("Timeout")}<select value={val('timeoutMs')} onChange={(event) => change('timeoutMs', Number(event.target.value))}>{[[5000, '5 seconds'], [10000, '10 seconds'], [15000, '15 seconds'], [30000, '30 seconds'], [60000, '60 seconds'], [120000, '120 seconds']].map(([ms, label]) => <option value={ms} key={ms}>{tr(String(label))}</option>)}</select></label>
-          <label className="span-2">{tr("Detection prompt")}<textarea rows={2} value={val('prompt')} onChange={(event) => change('prompt', event.target.value)} /></label>
-        </>}
+        </div>
+
+        <div className="editor-section">
+          <div className="form-separator"><span>{tr('MODELS')}</span></div>
+          <div className="model-discovery">
+            <button type="button" className="button secondary" onClick={() => void discover()} disabled={discovering || !val('baseUrl')}>{discovering ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />}{discovering ? tr('Fetching…') : tr('Fetch upstream models')}</button>
+            <span className="model-discovery-hint">{provider ? tr('Uses the saved API key unless you paste a new one above.') : tr('Fetches models available for this base URL and request format.')}</span>
+          </div>
+          {discoverEmpty && !discoverError && <div className="discovery-message error"><AlertCircle size={15} /><div><strong>{tr('No models were returned for this provider.')}</strong><small>{tr('Check the base URL and API key, or add model names manually below.')}</small></div></div>}
+          {discoverError && <div className="discovery-message error"><AlertCircle size={15} /><div><strong>{discoverError.message}</strong>{discoverError.suggestion && <small>{discoverError.suggestion}</small>}</div></div>}
+          {upstream && upstream.length > 0 && <div className="discovery-message success"><Check size={15} /><div><strong>{upstream.length} {tr('models available upstream. Check the ones you want to monitor.')}</strong><small><button type="button" className="text-button compact" onClick={() => toggleAllUpstream(true)}>{tr('Select all')}</button><button type="button" className="text-button compact" onClick={() => toggleAllUpstream(false)}>{tr('Clear selection')}</button></small></div></div>}
+          {upstream && <div className="upstream-list">{upstream.map((model) => {
+            const chosen = rows.some((row) => !row.saved && row.name.toLowerCase() === model.id.toLowerCase());
+            const already = rows.some((row) => row.saved && row.name.toLowerCase() === model.id.toLowerCase());
+            return <label className={`upstream-row ${already ? 'already-added' : ''}`} key={model.id}>
+              <span className="checkbox-control"><input type="checkbox" checked={chosen || already} disabled={already} onChange={(event) => toggleUpstream(model, event.target.checked)} /><span /></span>
+              <span className="upstream-name"><strong>{model.id}</strong>{model.label && model.label !== model.id && <small>{model.label}</small>}</span>
+              {already && <span className="upstream-tag">{tr('Added')}</span>}
+            </label>;
+          })}</div>}
+
+          <div className="model-table">
+            <div className="model-table-head"><span className="model-col-name">{tr('Model')}</span><span>{tr('Check interval')}</span><span>{tr('Jitter')}</span><span>{tr('Latency floating')}</span><span>{tr('Status')}</span><span /></div>
+            {rows.map((row) => <div className={`model-table-row ${row.saved ? '' : 'unsaved'}`} key={row.key}>
+              <span className="model-col-name">
+                <input aria-label={tr('Model name')} value={row.name} readOnly={row.saved} onChange={(event) => updateRow(row.key, { name: event.target.value })} placeholder={tr('model-name')} />
+                {!row.saved && <button type="button" className="icon-button tiny danger-hover" title={tr('Remove model')} onClick={() => void removeRow(row)}><X size={13} /></button>}
+              </span>
+              <select aria-label={tr('Check interval')} value={row.intervalSeconds} onChange={(event) => { const intervalSeconds = Number(event.target.value); updateRow(row.key, { intervalSeconds, jitterSeconds: Math.min(row.jitterSeconds, Math.floor(intervalSeconds / 2)) }); }}>{intervalOptions(row.intervalSeconds).map(([seconds, label]) => <option key={seconds} value={seconds}>{tr(label)}</option>)}</select>
+              <label className="model-jitter" title={tr('Seconds of random spread added around each check')}><input type="number" min="0" step="5" value={row.jitterSeconds} onChange={(event) => updateRow(row.key, { jitterSeconds: Math.max(0, Math.min(Math.floor(row.intervalSeconds / 2), Number(event.target.value))) })} /><span>{tr('sec')}</span></label>
+              <label className="model-floating"><span className="toggle-line compact"><input type="checkbox" checked={row.floatingEnabled} onChange={(event) => updateRow(row.key, { floatingEnabled: event.target.checked })} /><span className="toggle-ui" /></span><select value={row.floatingPercent} disabled={!row.floatingEnabled} onChange={(event) => updateRow(row.key, { floatingPercent: Number(event.target.value) })}>{floatingPresets.map(([percent, label]) => <option key={percent} value={percent}>{label}</option>)}</select></label>
+              <span className="model-status">{row.saved ? <><StatusBadge status={row.enabled ? row.status : 'DISABLED'} small /><small>{checkingIds.includes(row.key) ? tr('Checking…') : row.lastLatencyMs == null ? timeAgo(row.lastCheckedAt) : formatMs(row.lastLatencyMs)}</small></> : <em>{tr('New')}</em>}</span>
+              <span className="model-row-actions">{row.saved && <><button type="button" className="icon-button tiny" title={tr('Run check now')} disabled={checkingIds.includes(row.key)} onClick={() => void checkModel(row)}>{checkingIds.includes(row.key) ? <LoaderCircle size={13} className="spin" /> : <Zap size={13} />}</button><label className="toggle-line compact" title={row.enabled ? tr('Disable model') : tr('Enable model')}><input type="checkbox" checked={row.enabled} onChange={(event) => updateRow(row.key, { enabled: event.target.checked })} /><span className="toggle-ui" /></label><button type="button" className="icon-button tiny danger-hover" title={tr('Remove model')} disabled={removingIds.includes(row.key)} onClick={() => void removeRow(row)}>{removingIds.includes(row.key) ? <LoaderCircle size={13} className="spin" /> : <Trash2 size={13} />}</button></>}</span>
+            </div>)}
+            {!rows.length && <div className="model-table-empty">{tr('Fetch models from upstream or add one manually to get started.')}</div>}
+          </div>
+          <div className="model-add-actions"><button type="button" className="button secondary tiny-button" onClick={addManual}><Plus size={13} /> {tr('Add model manually')}</button>{selectedRows.length > 0 && <span className="muted-text">{selectedRows.length} {tr('new models selected')}</span>}</div>
+        </div>
       </div>
-      {testResult && <div className={`test-result ${testResult.success ? 'success' : 'error'}`}><div className="test-result-heading">{testResult.success ? <Check size={16} /> : <AlertCircle size={16} />}{testResult.success ? tr('Connection successful') : tr('Connection failed')}<span>{testResult.statusCode ? `HTTP ${testResult.statusCode}` : ''}</span></div>
-        <p>{testResult.error ?? `${formatMs(testResult.latency)} response${testResult.ttft == null ? '' : ` · ${formatMs(testResult.ttft)} TTFT`}${testResult.response ? ` · “${testResult.response}”` : ''}`}</p>{testResult.errorType && <small>{testResult.errorType}</small>}</div>}
-      </div>
-      <div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>{tr("Cancel")}</button>
-        {!provider && <button type="button" className="button outline" onClick={() => void testConnection()} disabled={testing || !val('baseUrl') || !val('model')}><Zap size={15} />{testing ? tr('Testing…') : tr('Test connection')}</button>}
-        {provider && provider.models[0] && <button type="button" className="button outline" onClick={() => void testConnection(provider.models[0]!.name)} disabled={testing}><Zap size={15} />{testing ? tr('Testing…') : tr('Test connection')}</button>}
+      <div className="modal-footer"><span className="modal-footer-note">{provider ? <>{savedCount} {tr('models monitored')}</> : tr('You can add more models after saving.')}</span><button type="button" className="button secondary" onClick={onClose}>{tr("Cancel")}</button>
         <button className="button primary" type="submit" disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />}{provider ? tr('Save changes') : tr('Add provider')}</button></div>
     </form>
   </div></div>;
@@ -574,7 +748,7 @@ function ModelDetail({ model, checks, range, setRange, onBack, onCheck, loading 
       <div className="chart-legend"><span><i className="legend-line" /> {tr("Response latency")}</span><span><i className="legend-dot" /> {tr("Warning at ")}{formatMs(model.warning_latency_ms)} <b /> {tr("Critical at ")}{formatMs(model.critical_latency_ms)}</span></div></section>
     <section className="detail-bottom-grid"><div className="section-card availability-card"><div className="section-heading compact-heading"><div><h2>{tr("Availability history")}</h2><p>{tr("Each square represents one model check.")}</p></div><span className="uptime-current">{uptime == null ? '—' : `${uptime.toFixed(2)}%`}</span></div><div className="availability-bars">{hourlyBars.length ? hourlyBars.map((check) => <span key={check.id} className={`availability-square ${check.available === 1 ? 'good' : check.available === 0 ? 'bad' : 'unknown'}`} title={`${dateTime(check.checked_at)} · ${check.status}${check.latency_ms == null ? '' : ` · ${formatMs(check.latency_ms)}`}`} />) : <span className="muted-text">{tr("Waiting for the first check.")}</span>}</div><div className="availability-legend"><span><i className="green-dot" /> {tr("Operational")}</span><span><i className="red-dot" /> {tr("Failed")}</span></div></div>
       <div className="section-card thresholds-card"><div className="section-heading compact-heading"><div><h2>{tr("Latency thresholds")}</h2><p>{tr("Fixed response time limits.")}</p></div></div><div className="threshold-line"><span className="threshold-marker warning" /><span>{tr("Warning after")}</span><strong>{formatMs(model.warning_latency_ms)}</strong></div><div className="threshold-line"><span className="threshold-marker critical" /><span>{tr("Critical after")}</span><strong>{formatMs(model.critical_latency_ms)}</strong></div><div className="detail-quiet-note"><ShieldCheck size={14} /> {tr("State changes require ")}{model.failure_threshold} {tr("failed / ")}{model.recovery_threshold} {tr("successful checks.")}</div></div></section>
-    <section className="section-block detail-history"><div className="section-heading"><div><h2>{tr("Recent checks")}</h2><p>{tr("Detailed responses are retained for ")}{model.settings?.retentionDays ?? 14} {tr("days.")}</p></div></div>{checks.length ? <div className="data-card history-list">{[...checks].reverse().slice(0, 12).map((check) => <details className="history-entry" key={check.id}><summary className="history-row"><span className={`status-dot ${check.available === 1 ? (check.status === 'SLOW' ? 'slow' : 'up') : check.available === null ? 'unknown' : 'down'}`} /><span>{dateTime(check.checked_at)}</span><StatusBadge status={check.status} small /><span>{check.status_code ? `HTTP ${check.status_code}` : '—'}</span><strong>{formatMs(check.latency_ms)}</strong><span className="history-error">{check.error_message ?? check.response_preview ?? 'Open check details'}</span><ChevronDown className="history-chevron" size={14} /></summary><div className="history-detail-grid"><div><span>{tr("Status code")}</span><strong>{check.status_code ?? '—'}</strong></div><div><span>{tr("Error type")}</span><strong>{check.error_type ?? '—'}</strong></div><div><span>{tr("Request duration")}</span><strong>{formatMs(check.latency_ms)}</strong></div><div><span>{tr("TTFT")}</span><strong>{formatMs(check.ttft_ms)}</strong></div><div><span>{tr("Timed out")}</span><strong>{check.timed_out ? 'Yes' : 'No'}</strong></div><div><span>{tr("Response size")}</span><strong>{check.response_size} {tr("bytes")}</strong></div><div className="history-detail-wide"><span>{tr("Checked at")}</span><strong>{dateTime(check.checked_at)}</strong></div>{check.error_message && <div className="history-detail-wide"><span>{tr("Error message")}</span><p>{check.error_message}</p></div>}{check.error_headers_json && <div className="history-detail-wide"><span>{tr("Response headers")}</span><pre>{formatJson(check.error_headers_json)}</pre></div>}{(check.error_body || check.response_preview) && <div className="history-detail-wide"><span>{check.error_body ? 'Response body' : 'Model response'}</span><pre>{check.error_body ?? check.response_preview}</pre></div>}</div></details>)}</div> : <EmptyState icon={<Clock3 size={19} />} title={tr("No checks yet")} description="Run a check to start this model's history." />}</section>
+    <section className="section-block detail-history"><div className="section-heading"><div><h2>{tr("Recent checks")}</h2><p>{tr("Detailed responses are retained for ")}{model.settings?.retentionDays ?? 14} {tr("days.")}</p></div></div>{checks.length ? <div className="data-card history-list">{[...checks].reverse().slice(0, 12).map((check) => <details className="history-entry" key={check.id}><summary className="history-row"><span className={`status-dot ${check.available === 1 ? (check.status === 'SLOW' ? 'slow' : 'up') : check.available === null ? 'unknown' : 'down'}`} /><span>{dateTime(check.checked_at)}</span><StatusBadge status={check.status} small /><span>{check.status_code ? `HTTP ${check.status_code}` : '—'}</span><strong>{formatMs(check.latency_ms)}</strong><span className="history-error">{check.error_message ?? check.response_preview ?? 'Open check details'}</span><ChevronDown className="history-chevron" size={14} /></summary><div className="history-detail-grid">{check.error_type && <div className="history-detail-wide"><span>{tr("What happened")}</span><strong>{errorLabel(check.error_type)}</strong>{errorSuggestion(check.error_type) && <p>{tr(errorSuggestion(check.error_type)!)}</p>}</div>}<div><span>{tr("Status code")}</span><strong>{check.status_code ?? '—'}</strong></div><div><span>{tr("Error type")}</span><strong>{check.error_type ? errorLabel(check.error_type) : '—'}</strong></div><div><span>{tr("Request duration")}</span><strong>{formatMs(check.latency_ms)}</strong></div><div><span>{tr("TTFT")}</span><strong>{formatMs(check.ttft_ms)}</strong></div><div><span>{tr("Timed out")}</span><strong>{check.timed_out ? 'Yes' : 'No'}</strong></div><div><span>{tr("Response size")}</span><strong>{check.response_size} {tr("bytes")}</strong></div><div className="history-detail-wide"><span>{tr("Checked at")}</span><strong>{dateTime(check.checked_at)}</strong></div>{(check.error_message || check.error_headers_json || check.error_body || check.response_preview) && <details className="history-technical"><summary>{tr("Technical details (for troubleshooting)")}</summary><div className="history-detail-grid">{check.error_message && <div className="history-detail-wide"><span>{tr("Error message")}</span><p>{check.error_message}</p></div>}{check.error_headers_json && <div className="history-detail-wide"><span>{tr("Response headers")}</span><pre>{formatJson(check.error_headers_json)}</pre></div>}{(check.error_body || check.response_preview) && <div className="history-detail-wide"><span>{check.error_body ? 'Response body' : 'Model response'}</span><pre>{check.error_body ?? check.response_preview}</pre></div>}</div></details>}</div></details>)}</div> : <EmptyState icon={<Clock3 size={19} />} title={tr("No checks yet")} description="Run a check to start this model's history." />}</section>
     <section className="section-block"><div className="section-heading"><div><h2>{tr("Incidents")}</h2><p>{tr("Availability and degradation events for this model.")}</p></div></div>{model.incidents?.length ? <div className="incident-list">{model.incidents.slice(0, 10).map((incident: Incident) => <IncidentRow key={incident.id} incident={incident} />)}</div> : <div className="empty-inline"><CheckCheck size={18} /><span>{tr("No incidents recorded.")}</span></div>}</section>
   </>;
 }
@@ -619,7 +793,7 @@ function IncidentRow({ incident, onClick }: { incident: Incident; onClick?: () =
   const minutes = Math.max(0, Math.floor((end - start) / 60_000));
   return <button className={`incident-row ${onClick ? 'clickable' : ''}`} onClick={onClick}><span className={`incident-icon ${incident.resolved_at ? 'resolved' : 'active'}`}>{incident.resolved_at ? <Check size={15} /> : <TriangleAlert size={15} />}</span>
     <span className="incident-main"><strong>{incident.title}</strong><span>{incident.provider_name} <b>{tr("·")}</b> {incident.model_name} <b>{tr("·")}</b> {dateTime(incident.started_at)}</span></span>
-    <span className="incident-description">{tr(incident.error_type ?? statusLabels[incident.status])}{incident.status_code ? ` · HTTP ${incident.status_code}` : ''}{incident.error_message ? ` · ${incident.error_message}` : ''}</span>
+    <span className="incident-description">{errorLabel(incident.error_type ?? statusLabels[incident.status])}{incident.status_code ? ` · HTTP ${incident.status_code}` : ''}{incident.error_message ? ` · ${incident.error_message}` : ''}</span>
     <span className="incident-duration">{incident.resolved_at ? getLanguage() === 'zh-CN' ? `${minutes}分钟` : `${minutes}m` : tr('Ongoing')}</span><StatusBadge status={incident.resolved_at ? 'UP' : incident.status} small />{onClick && <ChevronRight size={15} />}</button>;
 }
 

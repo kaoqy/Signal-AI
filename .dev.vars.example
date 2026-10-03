@@ -2,3 +2,4 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=change-this-local-password
 SESSION_SECRET=local-development-session-signing-key-change-before-production
 ENCRYPTION_KEY=local-development-encryption-key-change-before-production
+APP_ORIGIN=http://localhost:5173

@@ -33,6 +33,15 @@ const provider = createServer(async (request, response) => {
     response.end(JSON.stringify({ health: 'OK' }));
     return;
   }
+  if (request.method === 'GET' && request.url === '/v1/models') {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ object: 'list', data: [
+      { id: 'smoke-batch-alpha', object: 'model' },
+      { id: 'smoke-batch-alpha', object: 'model' },
+      { id: 'smoke-batch-beta', object: 'model' },
+    ] }));
+    return;
+  }
   let requestBody = '';
   for await (const chunk of request) requestBody += chunk;
   let model = '';
@@ -157,6 +166,40 @@ try {
   assert.equal(edited.response.status, 200, edited.result.error?.message ?? 'provider update failed');
   providers = data((await request('/api/providers')).result);
   assert.equal(providers.find((item) => item.id === primaryId).models.length, 2, 'provider should retain multiple models');
+
+  const discovered = data((await request('/api/providers/discover', { method: 'POST', body: {
+    providerId: primaryId, requestFormat: first.request_format, baseUrl: first.base_url, apiKey: '',
+  } })).result);
+  assert.deepEqual(discovered.models.map((item) => item.id), ['smoke-batch-alpha', 'smoke-batch-beta'], 'upstream model discovery should deduplicate and sort ids');
+
+  const batchAdd = await request(`/api/providers/${primaryId}/models/batch`, { method: 'POST', body: { models: [
+    { model: 'smoke-batch-alpha', intervalSeconds: 120, jitterSeconds: 10, floatingEnabled: true, floatingPercent: 50 },
+    { model: 'smoke-batch-beta', enabled: false },
+  ] } });
+  assert.equal(batchAdd.response.status, 201, batchAdd.result.error?.message ?? 'batch model add failed');
+  assert.equal(batchAdd.result.data.added, 2);
+  const afterBatch = data((await request('/api/providers')).result).find((item) => item.id === primaryId);
+  assert.equal(afterBatch.models.length, 4, 'batch add should append models');
+  const batchAlpha = afterBatch.models.find((item) => item.name === 'smoke-batch-alpha');
+  assert.equal(batchAlpha.interval_seconds, 120);
+  assert.equal(batchAlpha.jitter_seconds, 10);
+  assert.equal(batchAlpha.floating_enabled, 1);
+  assert.equal(batchAlpha.floating_percent, 50);
+  assert.equal(afterBatch.models.find((item) => item.name === 'smoke-batch-beta').enabled, 0, 'batch add should honour the enabled flag');
+
+  const batchRepeat = await request(`/api/providers/${primaryId}/models/batch`, { method: 'POST', body: { models: ['smoke-batch-alpha', 'smoke-batch-gamma'] } });
+  assert.equal(batchRepeat.result.data.added, 1, 'batch add should skip existing models');
+  assert.deepEqual(batchRepeat.result.data.skipped, ['smoke-batch-alpha']);
+  const batchEmpty = await request(`/api/providers/${primaryId}/models/batch`, { method: 'POST', body: { models: [] } });
+  assert.equal(batchEmpty.response.status, 400, 'batch add should reject an empty selection');
+  const batchInvalid = await request(`/api/providers/${primaryId}/models/batch`, { method: 'POST', body: { models: [{ model: '' }] } });
+  assert.equal(batchInvalid.response.status, 400, 'batch add should reject invalid model names');
+
+  for (const name of ['smoke-batch-alpha', 'smoke-batch-beta', 'smoke-batch-gamma']) {
+    const added = data((await request('/api/providers')).result).find((item) => item.id === primaryId).models.find((item) => item.name === name);
+    if (added) await request(`/api/models/${added.id}`, { method: 'DELETE' });
+  }
+  assert.equal(data((await request('/api/providers')).result).find((item) => item.id === primaryId).models.length, 2, 'cleanup should restore the original model count');
 
   const check = data((await request(`/api/models/${providerModelId}/check`, { method: 'POST', body: {} })).result);
   assert.equal(check.available, true);
